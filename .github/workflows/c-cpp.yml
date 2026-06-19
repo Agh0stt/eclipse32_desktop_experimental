@@ -1,0 +1,42 @@
+name: Build Eclipse32
+
+on:
+  push:
+    branches: ["main"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y nasm build-essential python3 llvm make git lld
+
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v1
+      with:
+        version: 0.12.0
+
+    - name: Build OS image
+      run: make
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: eclipse32-image
+        path: build/eclipse32.img
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: latest
+        name: Eclipse32 Latest Build
+        files: build/eclipse32.img
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

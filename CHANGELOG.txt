@@ -1,0 +1,30 @@
+# Changelog
+
+All notable changes to Eclipse32 are documented in this file.
+
+## [1.1.2] - 2026-04-17
+
+### Fixed
+- Resolved app stdin hangs caused by syscall gate configuration.
+- Updated syscall interrupt gate behavior to preserve keyboard IRQ handling during blocking reads.
+
+### Improved
+- Enhanced `sys_read(fd=0)` with interactive line input support (echo, backspace handling, newline normalization).
+- Improved userspace stdin behavior for C applications via libc scan/input path compatibility.
+
+## [1.1.1] - 2026-04-17
+
+### Added
+- Eclipse32 executable format support (`.E32`) and runtime execution flow.
+- C runtime foundation, syscall interface, and basic libc integration.
+- Boot splash screen.
+- Basic login support (default credentials configured as `root` / `root`).
+
+### Changed
+- Major OS rewrite with substantial kernel and shell improvements.
+
+## [1.0.0] - 2026-04-14
+
+### Added
+- Initial Eclipse32 release.
+- Early shell and filesystem functionality.

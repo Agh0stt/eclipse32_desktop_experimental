@@ -1,0 +1,9 @@
+qemu-system-i386 \
+  -drive file=build/eclipse32.img,format=raw,if=ide \
+  -m 64M \
+  -vga std \
+  -boot c \
+  -no-reboot \
+  -serial stdio \
+  -audiodev pa,id=snd0 \
+  -machine pcspk-audiodev=snd0
