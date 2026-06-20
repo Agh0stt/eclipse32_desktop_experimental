@@ -84,6 +84,15 @@ KERNEL_SRCS := \
     $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
     $(KERNEL_DIR)/drivers/speaker/speaker.c \
     $(KERNEL_DIR)/drivers/disk/ata.c \
+    $(KERNEL_DIR)/drivers/pci/pci.c \
+    $(KERNEL_DIR)/drivers/net/rtl8139.c \
+    $(KERNEL_DIR)/net/net.c \
+    $(KERNEL_DIR)/net/eth.c \
+    $(KERNEL_DIR)/net/arp.c \
+    $(KERNEL_DIR)/net/ipv4.c \
+    $(KERNEL_DIR)/net/icmp.c \
+    $(KERNEL_DIR)/net/udp.c \
+    $(KERNEL_DIR)/net/dns.c \
     $(KERNEL_DIR)/fs/fat32/fat32.c \
     $(KERNEL_DIR)/syscall/syscall.c \
     $(KERNEL_DIR)/exec/e32_loader.c \
@@ -328,6 +337,9 @@ run: $(DISK_IMG)
 		-vga std \
 		-boot c \
 		-no-reboot \
+		-netdev user,id=net0 \
+		-device rtl8139,netdev=net0 \
+		-object filter-dump,id=net0dump,netdev=net0,file=/tmp/eclipse32-net.pcap \
 		-serial stdio
 
 run-debug: $(DISK_IMG)
@@ -337,6 +349,9 @@ run-debug: $(DISK_IMG)
 		-vga std \
 		-boot c \
 		-no-reboot \
+		-netdev user,id=net0 \
+		-device rtl8139,netdev=net0 \
+		-object filter-dump,id=net0dump,netdev=net0,file=/tmp/eclipse32-net.pcap \
 		-serial stdio \
 		-d int,cpu_reset \
 		-D /tmp/eclipse32-debug.log \

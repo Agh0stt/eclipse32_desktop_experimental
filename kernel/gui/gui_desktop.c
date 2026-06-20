@@ -11,6 +11,7 @@
 #include "../syscall/syscall.h"
 #include "../sched/sched.h"
 #include "gui_compat.h"
+#include "../../net/net.h"
 
 // ============================================================
 // Theme system — runtime color variables
@@ -3185,6 +3186,10 @@ void gui_pump(void) {
     static int32_t drag_oy   = 0;
     static uint8_t prev_rbtn = 0;
     // gui_pump runs in TASK_GUI only — no re-entrancy issues with the scheduler.
+
+        // Drain any received network frames / retry pending ARP requests.
+        // Cheap no-op if no NIC was found at boot.
+        net_poll();
 
         // Sync mouse FIRST so mx/my reflect the current frame's position,
         // not last frame's.  This eliminates the 32ms click-position lag that

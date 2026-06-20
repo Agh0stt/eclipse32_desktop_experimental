@@ -15,6 +15,11 @@
 #include "../kernel/exec/e32_loader.h"
 #include "../kernel/syscall/syscall.h"
 #include "../kernel/kernel.h"
+#include "../kernel/net/net.h"
+#include "../kernel/net/icmp.h"
+#include "../kernel/net/dns.h"
+#include "../kernel/drivers/net/rtl8139.h"
+#include "../kernel/sched/sched.h"
 
 // =============================================================================
 // Config
@@ -1321,6 +1326,185 @@ static void builtin_sleep(cmd_t *cmd){
     pit_sleep_ms((uint32_t)katoi(cmd->args[1])); last_exit_code=0;
 }
 static bool is_builtin(const char *n);
+
+static bool parse_ipv4(const char *s, ipv4_addr_t *out) {
+    int octet[4] = {0,0,0,0};
+    int idx = 0;
+    int val = -1;
+    for (const char *p = s; ; p++) {
+        if (*p >= '0' && *p <= '9') {
+            if (val < 0) val = 0;
+            val = val * 10 + (*p - '0');
+            if (val > 255) return false;
+        } else if (*p == '.' || *p == '\0') {
+            if (val < 0) return false;
+            if (idx >= 4) return false;
+            octet[idx++] = val;
+            val = -1;
+            if (*p == '\0') break;
+        } else {
+            return false;
+        }
+    }
+    if (idx != 4) return false;
+    *out = ipv4_make((uint8_t)octet[0], (uint8_t)octet[1], (uint8_t)octet[2], (uint8_t)octet[3]);
+    return true;
+}
+
+static volatile bool     ping_reply_seen = false;
+static volatile uint32_t ping_reply_rtt  = 0;
+static volatile ipv4_addr_t ping_reply_from;
+
+static void ping_on_reply(ipv4_addr_t from, uint16_t identifier, uint16_t seq, uint32_t rtt_ms) {
+    (void)identifier; (void)seq;
+    ping_reply_seen = true;
+    ping_reply_rtt = rtt_ms;
+    ping_reply_from = from;
+}
+
+static void builtin_ping(cmd_t *cmd) {
+    if (cmd->argc < 2) { tprintf("usage: ping <ip>\n"); last_exit_code = 1; return; }
+    if (!rtl8139_present()) {
+        term_set_color(TC_RED);
+        tprintf("ping: no network interface available\n");
+        term_reset();
+        last_exit_code = 1;
+        return;
+    }
+
+    ipv4_addr_t dst;
+    if (!parse_ipv4(cmd->args[1], &dst)) {
+        tprintf("ping: invalid address '%s' (expected a.b.c.d)\n", cmd->args[1]);
+        last_exit_code = 1;
+        return;
+    }
+
+    icmp_set_reply_callback(ping_on_reply);
+
+    int count = 4;
+    int sent = 0, received = 0;
+    uint16_t identifier = 0xE32;
+
+    for (int seq = 0; seq < count; seq++) {
+        ping_reply_seen = false;
+
+        // ipv4_send() returns false while ARP is still resolving the next
+        // hop — keep polling/retrying the actual send for a short window
+        // before giving up on this sequence number. sched_yield() each
+        // iteration so TASK_GUI still gets to render frames/handle input
+        // while we wait — without it the desktop freezes for the whole
+        // ping duration since this loop owns the CPU as TASK_APP.
+        bool sent_ok = false;
+        uint32_t send_deadline = pit_ms() + 1000;
+        while (pit_ms() < send_deadline) {
+            if (icmp_send_ping(dst, identifier, (uint16_t)seq)) { sent_ok = true; break; }
+            net_poll();
+            sched_yield();
+        }
+        if (!sent_ok) {
+            tprintf("Request timeout (ARP) for icmp_seq %d\n", seq);
+            continue;
+        }
+        sent++;
+
+        uint32_t reply_deadline = pit_ms() + 2000;
+        while (pit_ms() < reply_deadline) {
+            net_poll();
+            if (ping_reply_seen) break;
+            sched_yield();
+        }
+
+        if (ping_reply_seen) {
+            received++;
+            ipv4_addr_t f = ping_reply_from;
+            tprintf("Reply from %d.%d.%d.%d: icmp_seq=%d time=%ums\n",
+                    f.b[0], f.b[1], f.b[2], f.b[3], seq, ping_reply_rtt);
+        } else {
+            tprintf("Request timeout for icmp_seq %d\n", seq);
+        }
+
+        if (seq < count - 1) {
+            uint32_t gap_deadline = pit_ms() + 500;
+            while (pit_ms() < gap_deadline) {
+                net_poll();
+                sched_yield();
+            }
+        }
+    }
+
+    icmp_set_reply_callback(NULL);
+
+    int loss = sent > 0 ? ((sent - received) * 100) / sent : 100;
+    tprintf("\n%d packets transmitted, %d received, %d%% packet loss\n", sent, received, loss);
+    last_exit_code = (received > 0) ? 0 : 1;
+}
+
+static void builtin_nslookup(cmd_t *cmd) {
+    if (cmd->argc < 2) { tprintf("usage: nslookup <hostname>\n"); last_exit_code = 1; return; }
+    if (!rtl8139_present()) {
+        term_set_color(TC_RED);
+        tprintf("nslookup: no network interface available\n");
+        term_reset();
+        last_exit_code = 1;
+        return;
+    }
+
+    const char *hostname = cmd->args[1];
+
+    // dns_query() (via udp_send -> ipv4_send) fails immediately if ARP for
+    // the gateway hasn't resolved yet — keep retrying the send for a short
+    // window instead of giving up on the very first attempt, same pattern
+    // as ping's send-retry loop.
+    bool sent_ok = false;
+    uint32_t send_deadline = pit_ms() + 1000;
+    while (pit_ms() < send_deadline) {
+        if (dns_query(hostname)) { sent_ok = true; break; }
+        net_poll();
+        sched_yield();
+    }
+
+    if (!sent_ok) {
+        term_set_color(TC_RED);
+        tprintf("nslookup: failed to send query (ARP not resolved for DNS server?)\n");
+        term_reset();
+        last_exit_code = 1;
+        return;
+    }
+
+    tprintf("Looking up %s ...\n", hostname);
+
+    ipv4_addr_t result;
+    bool resolved = false;
+    bool got_response = false;
+
+    uint32_t deadline = pit_ms() + 3000;
+    while (pit_ms() < deadline) {
+        net_poll();
+        if (dns_poll_result(&result)) {
+            resolved = true;
+            got_response = true;
+            break;
+        }
+        sched_yield();
+    }
+
+    if (resolved) {
+        tprintf("Name:    %s\nAddress: %d.%d.%d.%d\n",
+                hostname, result.b[0], result.b[1], result.b[2], result.b[3]);
+        last_exit_code = 0;
+    } else if (got_response) {
+        term_set_color(TC_RED);
+        tprintf("nslookup: %s: not found (NXDOMAIN or no A record)\n", hostname);
+        term_reset();
+        last_exit_code = 1;
+    } else {
+        term_set_color(TC_RED);
+        tprintf("nslookup: request timed out\n");
+        term_reset();
+        last_exit_code = 1;
+    }
+}
+
 static void builtin_beep(cmd_t *cmd){
     uint32_t hz = 880;
     uint32_t ms = 120;
@@ -1432,7 +1616,7 @@ static bool is_builtin(const char *n){
     static const char *b[]={"help","echo","cd","pwd","ls","cat","touch","mkdir","rm","cp","mv",
         "env","export","set","unset","alias","unalias","history","clear","uname","uptime","free",
         "date","sleep","beep","wc","which","source","exit","reboot","halt","true","false","write","ed",
-        "install","head","tail","stat","hexdump","basename","dirname","version","len","arch","hostname","wavplay",NULL};
+        "install","head","tail","stat","hexdump","basename","dirname","version","len","arch","hostname","wavplay","ping","nslookup",NULL};
     for(int i=0;b[i];i++) if(kstrcmp(n,b[i])==0) return true;
     return false;
 }
@@ -1489,6 +1673,8 @@ static int run_builtin(cmd_t *cmd){
     else if(kstrcmp(n,"wc")==0)      builtin_wc(cmd);
     else if(kstrcmp(n,"which")==0)   builtin_which(cmd);
     else if(kstrcmp(n,"install")==0)  builtin_install_cmd(cmd);
+    else if(kstrcmp(n,"ping")==0)     {builtin_ping(cmd);return last_exit_code;}
+    else if(kstrcmp(n,"nslookup")==0) {builtin_nslookup(cmd);return last_exit_code;}
     else if(kstrcmp(n,"head")==0)     builtin_head(cmd);
     else if(kstrcmp(n,"tail")==0)     builtin_tail(cmd);
     else if(kstrcmp(n,"stat")==0)     builtin_stat_cmd(cmd);
