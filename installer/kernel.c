@@ -180,7 +180,7 @@ static void scan_disks(void) {
 }
 
 // ---------------------------------------------------------------------------
-// ATAPI (CD-ROM) — used to read ECLIPSE.IMG off the install CD.
+// ATAPI (CD-ROM) — used to read ECLIPSE32.img off the install CD.
 //
 // IDENTIFY (0xEC) on an ATAPI device aborts; instead we soft-reset and
 // check the ATAPI signature (LBA mid = 0x14, LBA high = 0xEB) left in
@@ -352,12 +352,12 @@ static bool ata_write_sectors(const disk_t *d, uint32_t lba, uint8_t count, cons
 }
 
 // ---------------------------------------------------------------------------
-// Copy ECLIPSE.IMG from the CD (ATAPI) onto the chosen ATA disk.
+// Copy ECLIPSE32.img from the CD (ATAPI) onto the chosen ATA disk.
 //
 // Reads in 2048-byte CD-sector chunks, writes out as four 512-byte ATA
 // sectors per chunk. ECLIPSE_IMG_CD_LBA / ECLIPSE_IMG_SECTORS must match
-// the actual placement of ECLIPSE.IMG in the built ISO — verify with:
-//   xorriso -indev installer.iso -find /ECLIPSE.IMG -exec report_lba --
+// the actual placement of ECLIPSE32.img in the built ISO — verify with:
+//   xorriso -indev installer.iso -find /ECLIPSE32.img -exec report_lba --
 // after every build, the same way INST_KERNEL_LBA was verified in boot.asm.
 // ---------------------------------------------------------------------------
 #define ECLIPSE_IMG_CD_LBA   40          // verify per-build, see above

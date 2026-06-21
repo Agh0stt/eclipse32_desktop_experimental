@@ -30,8 +30,8 @@ echo "[1/3] First build pass..."
 build_pass
 
 KLBA1=$(get_lba /boot/kernel.bin)
-ELBA1=$(get_lba /ECLIPSE.IMG)
-echo "      kernel.bin LBA = $KLBA1, ECLIPSE.IMG LBA = $ELBA1"
+ELBA1=$(get_lba /ECLIPSE32.img)
+echo "      kernel.bin LBA = $KLBA1, ECLIPSE32.img LBA = $ELBA1"
 
 echo "[2/3] Patching LBA constants and rebuilding..."
 sed -i -E "s/%define INST_KERNEL_LBA[ \t]+[0-9]+/%define INST_KERNEL_LBA     $KLBA1/" boot.asm
@@ -39,8 +39,8 @@ sed -i -E "s/#define ECLIPSE_IMG_CD_LBA[ \t]+[0-9]+/#define ECLIPSE_IMG_CD_LBA  
 build_pass
 
 KLBA2=$(get_lba /boot/kernel.bin)
-ELBA2=$(get_lba /ECLIPSE.IMG)
-echo "      kernel.bin LBA = $KLBA2, ECLIPSE.IMG LBA = $ELBA2"
+ELBA2=$(get_lba /ECLIPSE32.img)
+echo "      kernel.bin LBA = $KLBA2, ECLIPSE32.img LBA = $ELBA2"
 
 echo "[3/3] Verifying stability..."
 if [ "$KLBA1" != "$KLBA2" ] || [ "$ELBA1" != "$ELBA2" ]; then
