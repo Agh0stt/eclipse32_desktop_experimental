@@ -1,5 +1,4 @@
 name: Build Eclipse32
-
 on:
   push:
     branches: ["main"]
@@ -8,7 +7,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
@@ -16,7 +14,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt update
-        sudo apt install -y nasm build-essential python3 llvm make git lld
+        sudo apt install -y nasm build-essential python3 llvm make git lld clang xorriso
 
     - name: Setup Zig
       uses: mlugg/setup-zig@v1
@@ -26,17 +24,55 @@ jobs:
     - name: Build OS image
       run: make
 
-    - name: Upload artifact
+    - name: Build installer ISO
+      run: |
+        cd installer
+        cp ../build/eclipse32.img isoroot/ECLIPSE32.img
+        bash build_iso.sh
+
+    - name: Rename artifacts with commit SHA
+      run: |
+        SHORT_SHA=$(git rev-parse --short HEAD)
+        cp build/eclipse32.img build/eclipse32-${SHORT_SHA}.img
+        cp installer/installer.iso installer/installer-${SHORT_SHA}.iso
+        echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
+
+    - name: Upload OS image artifact
       uses: actions/upload-artifact@v4
       with:
-        name: eclipse32-image
-        path: build/eclipse32.img
+        name: eclipse32-${{ env.SHORT_SHA }}
+        path: build/eclipse32-${{ env.SHORT_SHA }}.img
 
-    - name: Create Release
+    - name: Upload installer artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: installer-${{ env.SHORT_SHA }}
+        path: installer/installer-${{ env.SHORT_SHA }}.iso
+
+    - name: Download all previous release assets
+      run: |
+        gh release download latest --dir previous-assets || echo "No previous release assets found"
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Collect all release files
+      run: |
+        mkdir -p release-files
+        # Copy previous assets if any
+        if [ -d previous-assets ] && [ "$(ls -A previous-assets)" ]; then
+          cp previous-assets/* release-files/
+        fi
+        # Add new build
+        cp build/eclipse32-${{ env.SHORT_SHA }}.img release-files/
+        cp installer/installer-${{ env.SHORT_SHA }}.iso release-files/
+
+    - name: Update release with all images
       uses: softprops/action-gh-release@v2
       with:
         tag_name: latest
         name: Eclipse32 Latest Build
-        files: build/eclipse32.img
+        body: |
+          Latest build from commit ${{ env.SHORT_SHA }} — all per-commit images are attached below.
+        files: release-files/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
