@@ -27,6 +27,7 @@ jobs:
     - name: Build installer ISO
       run: |
         cd installer
+        mkdir -p build
         cp ../build/eclipse32.img isoroot/ECLIPSE32.img
         bash build_iso.sh
 
