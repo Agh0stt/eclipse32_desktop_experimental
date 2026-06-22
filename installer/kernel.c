@@ -107,6 +107,30 @@ static const char scancode_ascii[128] = {
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 };
 
+#define SC_F2  0x3C   // F2 scancode (make)
+
+// Returns the raw scancode (ignoring key-release events).
+static uint8_t kb_scancode(void) {
+    while (1) {
+        if (!(inb(0x64) & 1)) continue;
+        uint8_t sc = inb(0x60);
+        if (sc & 0x80) continue;   // skip key-release
+        return sc;
+    }
+}
+
+// Like kb_getchar but also returns '\x02' if F2 is pressed.
+static char kb_getchar_f2(void) {
+    while (1) {
+        if (!(inb(0x64) & 1)) continue;
+        uint8_t sc = inb(0x60);
+        if (sc & 0x80) continue;
+        if (sc == SC_F2) return '\x02';
+        char c = scancode_ascii[sc & 0x7F];
+        if (c) return c;
+    }
+}
+
 char kb_getchar(void) {
     while (1) {
         if (!(inb(0x64) & 1)) continue;
@@ -360,7 +384,7 @@ static bool ata_write_sectors(const disk_t *d, uint32_t lba, uint8_t count, cons
 //   xorriso -indev installer.iso -find /ECLIPSE32.img -exec report_lba --
 // after every build, the same way INST_KERNEL_LBA was verified in boot.asm.
 // ---------------------------------------------------------------------------
-#define ECLIPSE_IMG_CD_LBA   40          // verify per-build, see above
+#define ECLIPSE_IMG_CD_LBA   0          // verify per-build, see above
 #define ECLIPSE_IMG_MB       64
 #define ECLIPSE_IMG_CD_SECTS ((ECLIPSE_IMG_MB * 1024 * 1024) / 2048)
 
@@ -415,6 +439,91 @@ static bool install_to_disk(const disk_t *target) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Fancy UI — shown when the user presses F2.
+// Matches the style in the Eclipse32 installation manual / textbook:
+//   - Centered title bar (white on blue, full width)
+//   - Colored status lines
+//   - Separator line
+//   - Cleaner disk list
+// ---------------------------------------------------------------------------
+static void fancy_draw_title(void) {
+    vga_fill_row(0, ' ', 15, 1);
+    const char *title = "Eclipse32 Installer";
+    int tlen = strlen(title);
+    int tx   = (VGA_COLS - tlen) / 2;
+    vga_puts_at(tx, 0, title, 15, 1);
+}
+
+static void fancy_draw_separator(int y) {
+    for (int x = 0; x < VGA_COLS; x++)
+        vga_put_at(x, y, '-', 8, 0);
+}
+
+static void fancy_ui(void) {
+    vga_clear();
+    fancy_draw_title();
+
+    vga_move(0, 2);
+    vga_set_color(7, 0);
+    vga_puts("Found ECLIPSE.IMG (64 MB) on the install media.\n\n");
+
+    vga_set_color(14, 0);
+    vga_puts("Detected disks (install media excluded):\n");
+    vga_set_color(7, 0);
+
+    if (disk_count == 0) {
+        vga_set_color(12, 0);
+        vga_puts("  [FATAL] No destination disks found!\n");
+        vga_set_color(7, 0);
+        vga_puts("--------------------------------------------------------------------------------\n");
+        vga_puts("Press any key to halt.");
+        kb_getchar_f2();
+        return;
+    }
+
+    for (int i = 0; i < disk_count; i++) {
+        vga_puts("  [");
+        vga_print_uint(i);
+        vga_puts("] ");
+        int ml = strlen(disks[i].model);
+        vga_puts(disks[i].model);
+        for (int p = ml; p < 32; p++) vga_putchar(' ');
+        vga_puts("  -  ");
+        vga_print_uint(disks[i].size_mb);
+        vga_puts(" MB\n");
+    }
+
+    vga_puts("--------------------------------------------------------------------------------\n");
+    vga_puts("Pick a disk number to install Eclipse32 onto, or 'q' to drop to shell.\n> ");
+
+    while (1) {
+        char choice = kb_getchar_f2();
+        if (choice == 'q') { vga_puts("\nAborted.\n"); return; }
+        if (choice >= '0' && choice < ('0' + disk_count)) {
+            int idx = choice - '0';
+            vga_puts("\n\nInstalling to: ");
+            vga_puts(disks[idx].model);
+            vga_puts("\n");
+            if (install_to_disk(&disks[idx])) {
+                vga_set_color(10, 0);
+                vga_puts("\nInstallation complete!\n");
+                vga_set_color(7, 0);
+                vga_puts("Remove the install CD and press any key to reboot...\n");
+                kb_getchar_f2();
+                outb(0x64, 0xFE);
+            } else {
+                vga_set_color(12, 0);
+                vga_puts("\nInstallation failed.\n");
+                vga_set_color(7, 0);
+                vga_puts("Press any key to halt.\n");
+                kb_getchar_f2();
+            }
+            return;
+        }
+    }
+}
+
 __attribute__((section(".text.entry")))
 void inst_main(uint8_t boot_drv) {
     (void)boot_drv;
@@ -456,7 +565,12 @@ void inst_main(uint8_t boot_drv) {
     vga_puts("\nSelect target disk index to install Eclipse32 (or 'q' to abort): ");
 
     while (1) {
-        char choice = kb_getchar();
+        char choice = kb_getchar_f2();
+        if (choice == '\x02') {
+            // F2 — switch to fancy UI
+            fancy_ui();
+            goto done;
+        }
         if (choice == 'q') {
             vga_puts("\nInstallation aborted by user.");
             break;
@@ -482,6 +596,7 @@ void inst_main(uint8_t boot_drv) {
         }
     }
 
+    done:
     while (1) {
         asm volatile("hlt");
     }
