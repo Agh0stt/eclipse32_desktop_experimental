@@ -8,6 +8,8 @@
 #include "icmp.h"
 #include "udp.h"
 
+#include "tcp.h"
+
 extern mac_addr_t  net_get_mac(void);
 extern ipv4_addr_t net_get_ip(void);
 extern ipv4_addr_t net_get_gateway(void);
@@ -93,6 +95,7 @@ void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
         icmp_handle_packet(src_ip, payload, payload_len);
     } else if (hdr->protocol == IPV4_PROTO_UDP) {
         udp_handle_packet(src_ip, payload, payload_len);
+    } else if (hdr->protocol == IPV4_PROTO_TCP) {
+        tcp_handle_packet(src_ip, payload, payload_len);
     }
-    // TCP not implemented yet — silently dropped.
 }

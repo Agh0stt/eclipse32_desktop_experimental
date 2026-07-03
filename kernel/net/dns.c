@@ -191,9 +191,10 @@ bool dns_poll_result(ipv4_addr_t *out_ip) {
 }
 
 bool dns_resolve_blocking(const char *hostname, ipv4_addr_t *out_ip, uint32_t timeout_ms) {
-    if (!dns_query(hostname)) return false;
-
     uint32_t deadline = pit_ms() + timeout_ms;
+    bool sent = dns_query(hostname);
+    while (!sent && pit_ms() < deadline) { net_poll(); sent = dns_query(hostname); }
+    if (!sent) return false;
     while (pit_ms() < deadline) {
         net_poll();
         if (result_ready) {

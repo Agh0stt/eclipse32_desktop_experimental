@@ -5,6 +5,7 @@
 #include "net.h"
 #include "eth.h"
 #include "arp.h"
+#include "tcp.h"
 #include "../drivers/net/rtl8139.h"
 
 static mac_addr_t  g_my_mac;
@@ -32,4 +33,5 @@ void net_poll(void) {
 
     rtl8139_poll(eth_handle_frame);
     arp_tick();
+    tcp_tick();
 }

@@ -85,7 +85,13 @@ static void rtl8139_irq_handler(void *regs) {
     // Write back to ack/clear the bits we observed.
     outw(g_nic.io_base + REG_ISR, isr);
 
-    pic_send_eoi(g_nic.irq_line);
+    // NOTE: do not send the PIC EOI here. interrupt_dispatch() in idt.c
+    // already sends a single unconditional EOI for every hardware IRQ
+    // (vec 32-47) right after this handler returns. Sending a second EOI
+    // here caused a double-EOI per NIC interrupt, which under heavy RX/TX
+    // traffic corrupted the 8259's in-service bookkeeping and could clear
+    // IRQ0 (PIT)'s in-service bit prematurely -- starving pit_sleep_ms()
+    // busy-waits and freezing the kernel mid-download.
 }
 
 bool rtl8139_present(void) {

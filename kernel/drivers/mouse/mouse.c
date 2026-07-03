@@ -67,7 +67,7 @@ static void mouse_irq_handler(void *regs) {
 
     // Basic sync: byte 0 must have bit 3 set
     if (g_byte_idx == 0 && !(byte & 0x08)) {
-        pic_send_eoi(MOUSE_IRQ);
+        // NOTE: no manual EOI here -- see bottom of function.
         return;
     }
 
@@ -82,7 +82,7 @@ static void mouse_irq_handler(void *regs) {
 
         // Overflow bits — discard packet
         if ((flags & 0x40) || (flags & 0x80)) {
-            pic_send_eoi(MOUSE_IRQ);
+            // NOTE: no manual EOI here -- see bottom of function.
             return;
         }
 
@@ -113,7 +113,15 @@ static void mouse_irq_handler(void *regs) {
         }
     }
 
-    pic_send_eoi(MOUSE_IRQ);
+    // NOTE: do not send the PIC EOI here. interrupt_dispatch() in idt.c
+    // already sends a single unconditional EOI (both PIC2 and PIC1, since
+    // IRQ12 is on the slave) for every hardware IRQ right after this
+    // handler returns. The three pic_send_eoi(MOUSE_IRQ) calls that used
+    // to be in this function (one per early-return branch, one here) each
+    // doubled up with that generic EOI -- and since the mouse moves
+    // constantly during normal use, this was a much higher-frequency
+    // source of 8259 in-service corruption than the RTL8139 double-EOI
+    // (same root cause, fixed the same way, in rtl8139_irq_handler).
 }
 
 // ---- Public API -------------------------------------------------------------
