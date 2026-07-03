@@ -93,6 +93,7 @@ typedef enum {
     APP_OS32,       /* launches hello.os32 directly from desktop */
     APP_SETTINGS,   /* theme / settings panel */
     APP_SDK,        /* SDK-managed window; userspace app draws its own content */
+    APP_USERS,      /* user account manager */
     APP_COUNT
 } AppType;
 

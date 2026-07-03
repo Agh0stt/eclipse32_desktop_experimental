@@ -12,6 +12,109 @@
 #include "../sched/sched.h"
 #include "gui_compat.h"
 #include "../../net/net.h"
+#include "../bootmenu/bootmenu.h"
+
+// ============================================================
+// User account database
+// ============================================================
+#define MAX_USERS        8
+#define USER_NAME_LEN   32
+#define USER_PASS_LEN   32
+#define USER_HINT_LEN   48
+#define USER_DB_PATH    "/etc/users.dat"
+#define USER_DB_MAGIC   0x45555352u  /* 'EUSR' */
+
+// Avatar palette — 8 distinct colours users can pick
+static const uint32_t g_avatar_cols[8] = {
+    RGB(70,130,180),  // steel blue
+    RGB(180,60,60),   // red
+    RGB(60,160,80),   // green
+    RGB(180,120,40),  // orange
+    RGB(130,60,180),  // purple
+    RGB(40,160,160),  // teal
+    RGB(180,50,120),  // pink
+    RGB(100,100,100), // grey
+};
+static const char *g_avatar_names[8] = {
+    "Blue","Red","Green","Orange","Purple","Teal","Pink","Grey"
+};
+
+typedef struct {
+    char     name[USER_NAME_LEN];
+    char     pass[USER_PASS_LEN];   /* plain text (hobby OS) */
+    char     hint[USER_HINT_LEN];
+    uint8_t  avatar_idx;            /* index into g_avatar_cols */
+    uint8_t  valid;
+} UserEntry;
+
+typedef struct {
+    uint32_t  magic;
+    uint8_t   count;
+    UserEntry users[MAX_USERS];
+} UserDB;
+
+static UserDB g_udb;
+
+// ============================================================
+// Login screen state
+// ============================================================
+// Phases: 0 = login screen, 1 = desktop running
+static uint8_t  g_login_done   = 0;
+static int32_t  g_login_sel    = 0;   /* which user tile is highlighted */
+static char     g_login_pass[USER_PASS_LEN] = {0};
+static int32_t  g_login_pass_len = 0;
+static uint8_t  g_login_err    = 0;   /* 1 = wrong password flash */
+static uint32_t g_login_err_tick = 0;
+static uint8_t  g_login_reset_armed = 0;  /* 1 = "Reset Password" was clicked once, awaiting confirm */
+static uint32_t g_login_reset_tick  = 0;
+static uint8_t  g_login_reset_done  = 0;  /* 1 = password just reset, show confirmation flash */
+static int8_t   g_login_power_armed = 0;  /* 0 = none, 1 = reboot armed, 2 = power-off armed */
+static uint32_t g_login_power_tick  = 0;
+// Which field is focused in "Add User" window
+// (reuse per-window AppState.text for each field via separate globals)
+
+// ============================================================
+// User DB helpers
+// ============================================================
+static void udb_load(void) {
+    g_udb.magic = USER_DB_MAGIC;
+    g_udb.count = 0;
+    int fd = fat32_open(USER_DB_PATH, FAT32_O_RDONLY);
+    if (fd < 0) return;
+    int r = fat32_read(fd, &g_udb, sizeof(g_udb));
+    fat32_close(fd);
+    if (r != (int)sizeof(g_udb) || g_udb.magic != USER_DB_MAGIC) {
+        g_udb.magic = USER_DB_MAGIC;
+        g_udb.count = 0;
+    }
+    // clamp count
+    if (g_udb.count > MAX_USERS) g_udb.count = MAX_USERS;
+}
+
+static void udb_save(void) {
+    // ensure /etc exists
+    fat32_stat_t st;
+    if (fat32_stat("/etc", &st) != 0) fat32_mkdir("/etc");
+    int fd = fat32_open(USER_DB_PATH, FAT32_O_RDWR | FAT32_O_CREAT | FAT32_O_TRUNC);
+    if (fd < 0) return;
+    fat32_write(fd, &g_udb, sizeof(g_udb));
+    fat32_close(fd);
+}
+
+static int udb_add(const char *name, const char *pass, const char *hint, uint8_t av) {
+    if (g_udb.count >= MAX_USERS) return -1;
+    UserEntry *e = &g_udb.users[g_udb.count++];
+    e->valid = 1;
+    e->avatar_idx = av;
+    kstrncpy(e->name, name, USER_NAME_LEN-1);
+    e->name[USER_NAME_LEN-1] = 0;
+    kstrncpy(e->pass, pass, USER_PASS_LEN-1);
+    e->pass[USER_PASS_LEN-1] = 0;
+    kstrncpy(e->hint, hint, USER_HINT_LEN-1);
+    e->hint[USER_HINT_LEN-1] = 0;
+    udb_save();
+    return 0;
+}
 
 // ============================================================
 // Theme system — runtime color variables
@@ -662,6 +765,7 @@ static const MenuItem g_menu_items[] = {
     { "IP Config",      APP_IPCONFIG    },
     { "Help",           APP_HELP        },
     { "Settings",       APP_SETTINGS    },
+    { "Users",          APP_USERS       },
     { "About",          APP_ABOUT       },
 };
 #define N_MENU_ITEMS  ((int32_t)(sizeof(g_menu_items)/sizeof(g_menu_items[0])))
@@ -810,6 +914,7 @@ static int32_t open_window(AppType app) {
         w->st.text_len=(int32_t)kstrlen(w->st.text); break;
     case APP_ABOUT:       kstrcpy(w->title,"About Eclipse32"); w->w=300;w->h=220; break;
     case APP_SETTINGS:    kstrcpy(w->title,"Settings");        w->w=380;w->h=560; break;
+    case APP_USERS:       kstrcpy(w->title,"User Accounts");   w->w=320;w->h=480; break;
     default:              kstrcpy(w->title,"Window");        w->w=320;w->h=240; break;
     }
 
@@ -2758,6 +2863,368 @@ static void render_os32app(Window *w, int32_t mx, int32_t my, uint8_t click){
     }
 }
 
+// ============================================================
+// Login screen  (full-screen, shown instead of desktop when
+// users exist and no one has logged in yet)
+// ============================================================
+static void render_login_screen(int32_t mx, int32_t my, uint8_t click) {
+    int32_t W = SCREEN_W, H = SCREEN_H;
+
+    // Background gradient-ish (two-band fill)
+    gui_fill_rect(0, 0, W, H/2, RGB(20,40,80));
+    gui_fill_rect(0, H/2, W, H/2, RGB(10,20,50));
+
+    // Title
+    const char *title = "Eclipse32";
+    int32_t tw = (int32_t)kstrlen(title) * FONT_W * 2;
+    // Big title — draw twice for 2× size effect
+    for (int32_t dy = 0; dy < 2; dy++)
+        for (int32_t dx = 0; dx < 2; dx++)
+            gui_puts((W - tw)/2 + dx, 28 + dy, title, RGB(100,180,255), RGB(20,40,80));
+
+    gui_puts((W - 18*FONT_W)/2, 52, "Select your account", RGB(180,200,230), RGB(10,20,50));
+    gui_draw_hline(0, 72, W, RGB(60,100,160));
+
+    // ---- Power controls (top-right corner, always available) ----
+    // Both require a second, confirming click within 4s so a stray click
+    // up here can't silently reboot or halt the machine.
+    if (g_login_power_armed && (get_ticks() - g_login_power_tick) > 4000) {
+        g_login_power_armed = 0;
+    }
+    {
+        const char *reboot_lbl = (g_login_power_armed == 1) ? "Confirm reboot?" : "Reboot";
+        if (gui_button(W-330, 8, 150, 22, reboot_lbl, mx, my, click)) {
+            if (g_login_power_armed != 1) {
+                g_login_power_armed = 1;
+                g_login_power_tick = get_ticks();
+            } else {
+                machine_reboot();
+            }
+        }
+        const char *power_lbl = (g_login_power_armed == 2) ? "Confirm power off?" : "Power Off";
+        if (gui_button(W-170, 8, 160, 22, power_lbl, mx, my, click)) {
+            if (g_login_power_armed != 2) {
+                g_login_power_armed = 2;
+                g_login_power_tick = get_ticks();
+            } else {
+                machine_poweroff();
+            }
+        }
+    }
+
+    // User tiles — up to 4 per row
+    int32_t n = g_udb.count;
+    int32_t tile_w = 110, tile_h = 120;
+    int32_t cols = (n < 4) ? n : 4;
+    if (cols == 0) cols = 1;
+    int32_t row_w = cols * tile_w + (cols-1)*16;
+    int32_t sx = (W - row_w) / 2;
+    int32_t sy = 90;
+
+    for (int32_t i = 0; i < n; i++) {
+        int32_t col_i = i % 4;
+        int32_t row_i = i / 4;
+        int32_t tx = sx + col_i*(tile_w+16);
+        int32_t ty = sy + row_i*(tile_h+12);
+
+        uint8_t sel = (g_login_sel == i);
+        uint32_t bg = sel ? RGB(40,80,150) : RGB(15,30,65);
+        uint32_t border = sel ? RGB(100,160,255) : RGB(50,80,130);
+
+        gui_fill_rect(tx, ty, tile_w, tile_h, bg);
+        gui_draw_rect_border(tx, ty, tile_w, tile_h, border, border);
+
+        // Avatar circle (4x4 pixel square as a stand-in for circle)
+        uint32_t avcol = g_avatar_cols[g_udb.users[i].avatar_idx & 7];
+        int32_t av_cx = tx + tile_w/2 - 18;
+        int32_t av_cy = ty + 12;
+        gui_fill_rect(av_cx, av_cy, 36, 36, avcol);
+        // Draw initials inside avatar
+        char init[2] = { g_udb.users[i].name[0], 0 };
+        gui_puts(av_cx + 14, av_cy + 14, init, RGB(255,255,255), avcol);
+
+        // Name
+        int32_t nlen = (int32_t)kstrlen(g_udb.users[i].name);
+        int32_t nx = tx + (tile_w - nlen*FONT_W)/2;
+        gui_puts(nx, ty+52, g_udb.users[i].name, RGB(220,235,255), bg);
+
+        // Password field (only shown when selected)
+        if (sel) {
+            gui_fill_rect(tx+8, ty+66, tile_w-16, 14, RGB(255,255,255));
+            gui_draw_rect_border(tx+8, ty+66, tile_w-16, 14, RGB(80,120,200), RGB(40,60,160));
+            // Draw dots for entered chars
+            char dots[USER_PASS_LEN+1];
+            int32_t dl = g_login_pass_len < (int32_t)(tile_w-20)/FONT_W
+                       ? g_login_pass_len
+                       : (tile_w-20)/FONT_W;
+            for (int32_t d = 0; d < dl; d++) dots[d] = '*';
+            dots[dl] = 0;
+            gui_puts(tx+10, ty+68, dots, RGB(0,0,0), RGB(255,255,255));
+            // Hint
+            if (g_udb.users[i].hint[0]) {
+                gui_puts(tx+4, ty+84, "Hint:", RGB(160,200,255), bg);
+                // truncate hint to fit
+                char hbuf[20];
+                kstrncpy(hbuf, g_udb.users[i].hint, 18);
+                hbuf[18] = 0;
+                gui_puts(tx+4, ty+94, hbuf, RGB(130,170,220), bg);
+            }
+            if (g_login_err && (get_ticks() - g_login_err_tick) < 1500) {
+                gui_puts(tx+4, ty+106, "Wrong password", RGB(255,80,80), bg);
+            }
+        }
+
+        // Click to select
+        if (click && mx>=tx && mx<tx+tile_w && my>=ty && my<ty+tile_h) {
+            if (g_login_sel != i) {
+                g_login_sel = i;
+                g_login_pass_len = 0;
+                g_login_pass[0] = 0;
+                g_login_err = 0;
+                g_login_reset_armed = 0;
+                g_login_reset_done = 0;
+            }
+        }
+    }
+
+    // ---- Reset Password (below the tile grid, only when a user exists) ----
+    if (n > 0) {
+        int32_t rows = (n + 3) / 4;
+        int32_t grid_bottom = sy + (rows - 1) * (tile_h + 12) + tile_h;
+        int32_t rb_w = 190, rb_h = 20;
+        int32_t rb_x = (W - rb_w) / 2;
+        int32_t rb_y = grid_bottom + 14;
+        if (rb_y > H - 66) rb_y = H - 66;  // keep clear of the bottom hint text
+
+        // Auto-disarm the confirmation after a few seconds of no follow-up click.
+        if (g_login_reset_armed && (get_ticks() - g_login_reset_tick) > 4000) {
+            g_login_reset_armed = 0;
+        }
+
+        const char *rb_label = g_login_reset_armed ? "Click again to confirm" : "Reset Password";
+        if (gui_button(rb_x, rb_y, rb_w, rb_h, rb_label, mx, my, click)) {
+            if (!g_login_reset_armed) {
+                g_login_reset_armed = 1;
+                g_login_reset_tick = get_ticks();
+                g_login_reset_done = 0;
+            } else {
+                UserEntry *u = &g_udb.users[g_login_sel];
+                u->pass[0] = 0;
+                udb_save();
+                g_login_reset_armed = 0;
+                g_login_reset_done = 1;
+                g_login_reset_tick = get_ticks();
+                g_login_pass_len = 0;
+                g_login_pass[0] = 0;
+                g_login_err = 0;
+            }
+        }
+        if (g_login_reset_done && (get_ticks() - g_login_reset_tick) < 2000) {
+            gui_puts(rb_x - 6, rb_y + rb_h + 4, "Password cleared", RGB(140,220,140), RGB(10,20,50));
+        }
+    }
+
+    // Keyboard: only if a user is selected
+    if (n > 0) {
+        // Read all pending keys this frame
+        while (keyboard_has_event()) {
+            key_event_t e = keyboard_get_event();
+            if (e.released) continue;
+            if (e.keycode == KEY_ENTER ||
+                (e.keycode == KEY_ASCII && (e.ascii == '\n' || e.ascii == '\r'))) {
+                // Attempt login
+                UserEntry *u = &g_udb.users[g_login_sel];
+                if (u->pass[0] == 0 || kstrcmp(g_login_pass, u->pass) == 0) {
+                    // Logged in!
+                    g_login_done = 1;
+                    open_window(APP_TERMINAL);
+                } else {
+                    g_login_err = 1;
+                    g_login_err_tick = get_ticks();
+                    g_login_pass_len = 0;
+                    g_login_pass[0] = 0;
+                }
+            } else if (e.keycode == KEY_BACKSPACE ||
+                       (e.keycode == KEY_ASCII && e.ascii == '\b')) {
+                if (g_login_pass_len > 0) {
+                    g_login_pass_len--;
+                    g_login_pass[g_login_pass_len] = 0;
+                }
+            } else if (e.keycode == KEY_ASCII && e.ascii >= 32) {
+                if (g_login_pass_len < USER_PASS_LEN-1) {
+                    g_login_pass[g_login_pass_len++] = e.ascii;
+                    g_login_pass[g_login_pass_len] = 0;
+                }
+            }
+        }
+        // Show "Press Enter to sign in" hint at bottom
+        gui_puts((W - 22*FONT_W)/2, H-26, "Type password, press Enter", RGB(120,150,200), RGB(10,20,50));
+        if (n > 1) {
+            gui_puts((W - 26*FONT_W)/2, H-14, "Click another tile to switch user", RGB(80,110,160), RGB(10,20,50));
+        }
+    } else {
+        gui_puts((W - 20*FONT_W)/2, H/2, "No users — loading desktop", RGB(120,150,200), RGB(10,20,50));
+        g_login_done = 1;
+        open_window(APP_TERMINAL);
+    }
+}
+
+// ============================================================
+// Add User window (APP_USERS)
+// ============================================================
+// Per-window input fields stored in AppState.text (reused as a mini struct):
+// We pack: [field0_buf 32][field1_buf 32][field2_buf 48][avatar_idx 1][focus 1]
+// Offsets within AppState.text:
+#define UW_NAME_OFF  0
+#define UW_PASS_OFF  32
+#define UW_HINT_OFF  64
+#define UW_AV_OFF    112   // 1 byte avatar index
+#define UW_FOC_OFF   113   // 1 byte focused field (0=name,1=pass,2=hint)
+#define UW_STATUS_OFF 114  // 1 byte: 0=idle,1=ok,2=full
+
+static void render_users(Window *w, int32_t mx, int32_t my, uint8_t click) {
+    int32_t cx=win_ca_x(w), cy=win_ca_y(w), cw=win_ca_w(w), ch=win_ca_h(w);
+    gui_fill_rect(cx, cy, cw, ch, COL_WIN_BG);
+
+    // Header bar
+    gui_fill_rect(cx, cy, cw, FONT_H+8, COL_WIN_TITLE_ACT);
+    gui_puts(cx+6, cy+4, "User Accounts", COL_WIN_TITLE_TXT, COL_WIN_TITLE_ACT);
+
+    char *name_buf  = &w->st.text[UW_NAME_OFF];
+    char *pass_buf  = &w->st.text[UW_PASS_OFF];
+    char *hint_buf  = &w->st.text[UW_HINT_OFF];
+    uint8_t *av_idx = (uint8_t*)&w->st.text[UW_AV_OFF];
+    uint8_t *focus  = (uint8_t*)&w->st.text[UW_FOC_OFF];
+    uint8_t *status = (uint8_t*)&w->st.text[UW_STATUS_OFF];
+
+    int32_t ty = cy + FONT_H + 14;
+
+    // ---- Existing users list ----
+    gui_puts(cx+4, ty, "Existing users:", COL_TEXT, COL_WIN_BG); ty += FONT_H+4;
+    if (g_udb.count == 0) {
+        gui_puts(cx+12, ty, "(none)", RGB(120,120,120), COL_WIN_BG); ty += FONT_H+4;
+    } else {
+        for (int32_t i = 0; i < (int32_t)g_udb.count; i++) {
+            // avatar swatch
+            uint32_t avcol = g_avatar_cols[g_udb.users[i].avatar_idx & 7];
+            gui_fill_rect(cx+12, ty, 10, 10, avcol);
+            gui_draw_rect_border(cx+12, ty, 10, 10, RGB(80,80,80), RGB(80,80,80));
+            // name
+            char line[64];
+            kstrcpy(line, g_udb.users[i].name);
+            gui_puts(cx+26, ty+1, line, COL_TEXT, COL_WIN_BG);
+            ty += FONT_H + 5;
+        }
+    }
+
+    gui_draw_hline(cx+4, ty, cw-8, RGB(160,160,160)); ty += 6;
+
+    // ---- Add new user form ----
+    if (g_udb.count >= MAX_USERS) {
+        gui_puts(cx+4, ty, "Max users reached (8)", RGB(180,60,60), COL_WIN_BG);
+        return;
+    }
+
+    gui_puts(cx+4, ty, "Add new user:", COL_TEXT, COL_WIN_BG); ty += FONT_H+6;
+
+    // Field helper macro
+    #define UW_FIELD(label, buf, maxlen, foc_idx, mask) do { \
+        gui_puts(cx+4, ty, label, COL_TEXT, COL_WIN_BG); \
+        int32_t fy = ty + FONT_H + 2; \
+        uint32_t fbg = (*focus == foc_idx) ? RGB(255,255,255) : RGB(230,230,230); \
+        uint32_t fborder = (*focus == foc_idx) ? RGB(50,100,200) : RGB(150,150,150); \
+        gui_fill_rect(cx+4, fy, cw-8, 14, fbg); \
+        gui_draw_rect_border(cx+4, fy, cw-8, 14, fborder, fborder); \
+        /* Draw content (masked if password) */ \
+        char disp[USER_PASS_LEN+1]; \
+        int32_t dlen = (int32_t)kstrlen(buf); \
+        if (mask) { for(int32_t _i=0;_i<dlen;_i++) disp[_i]='*'; disp[dlen]=0; } \
+        else { kstrncpy(disp,buf,USER_PASS_LEN); disp[USER_PASS_LEN]=0; } \
+        gui_puts(cx+6, fy+3, disp, RGB(0,0,0), fbg); \
+        if (*focus == foc_idx && (get_ticks()/30)%2==0) { \
+            int32_t cpos = cx+6 + dlen*FONT_W; \
+            if (cpos < cx+cw-6) gui_fill_rect(cpos, fy+2, 1, 10, RGB(0,0,200)); \
+        } \
+        if (click && mx>=cx+4 && mx<cx+cw-4 && my>=fy && my<fy+14) *focus = foc_idx; \
+        ty = fy + 14 + 8; \
+    } while(0)
+
+    UW_FIELD("Name:",     name_buf, USER_NAME_LEN-1, 0, 0);
+    UW_FIELD("Password:", pass_buf, USER_PASS_LEN-1, 1, 1);
+    UW_FIELD("Hint:",     hint_buf, USER_HINT_LEN-1, 2, 0);
+
+    #undef UW_FIELD
+
+    // Avatar picker
+    gui_puts(cx+4, ty, "Picture:", COL_TEXT, COL_WIN_BG); ty += FONT_H+4;
+    for (int32_t ai = 0; ai < 8; ai++) {
+        int32_t ax = cx + 4 + ai*20;
+        uint8_t sel = (*av_idx == (uint8_t)ai);
+        gui_fill_rect(ax, ty, 16, 16, g_avatar_cols[ai]);
+        if (sel) gui_draw_rect_border(ax-1, ty-1, 18, 18, RGB(255,255,0), RGB(255,200,0));
+        else      gui_draw_rect_border(ax,  ty,   16, 16, RGB(80,80,80), RGB(80,80,80));
+        if (click && mx>=ax && mx<ax+16 && my>=ty && my<ty+16) *av_idx = (uint8_t)ai;
+    }
+    // show selected colour name
+    gui_puts(cx+4, ty+20, g_avatar_names[*av_idx & 7], RGB(80,80,80), COL_WIN_BG);
+    ty += 40;
+
+    // Status message
+    if (*status == 1) {
+        gui_puts(cx+4, ty, "User added!", RGB(0,140,0), COL_WIN_BG);
+    } else if (*status == 2) {
+        gui_puts(cx+4, ty, "Name required!", RGB(200,0,0), COL_WIN_BG);
+    }
+    ty += FONT_H + 6;
+
+    // Add button
+    if (gui_button(cx+4, ty, 70, 18, "Add User", mx, my, click)) {
+        if (name_buf[0] == 0) {
+            *status = 2;
+        } else {
+            udb_add(name_buf, pass_buf, hint_buf, *av_idx);
+            // Clear form
+            name_buf[0] = 0; pass_buf[0] = 0; hint_buf[0] = 0;
+            *av_idx = 0; *focus = 0; *status = 1;
+        }
+    }
+
+    // Keyboard input
+    char kc = kb_getchar_nowait();
+    if (kc) {
+        char *cur_buf = (*focus == 0) ? name_buf
+                      : (*focus == 1) ? pass_buf
+                      : hint_buf;
+        int32_t maxlen = (*focus == 0) ? USER_NAME_LEN-1
+                       : (*focus == 1) ? USER_PASS_LEN-1
+                       : USER_HINT_LEN-1;
+        if (kc == '\b') {
+            int32_t l = (int32_t)kstrlen(cur_buf);
+            if (l > 0) cur_buf[l-1] = 0;
+        } else if (kc == '\t') {
+            // Tab cycles fields
+            *focus = (*focus + 1) % 3;
+        } else if (kc == '\r' || kc == '\n') {
+            // Enter moves to next field or adds user on last field
+            if (*focus < 2) { *focus = *focus + 1; }
+            else {
+                if (name_buf[0] == 0) { *status = 2; }
+                else {
+                    udb_add(name_buf, pass_buf, hint_buf, *av_idx);
+                    name_buf[0]=0; pass_buf[0]=0; hint_buf[0]=0;
+                    *av_idx=0; *focus=0; *status=1;
+                }
+            }
+        } else if (kc >= 32) {
+            int32_t l = (int32_t)kstrlen(cur_buf);
+            if (l < maxlen) { cur_buf[l] = kc; cur_buf[l+1] = 0; }
+        }
+        if (*status != 1) *status = 0;  // clear error on input
+    }
+
+    (void)ch;
+}
+
 static void render_about(Window *w, int32_t mx, int32_t my, uint8_t click){
     int32_t cx=win_ca_x(w),cy=win_ca_y(w),cw=win_ca_w(w),ch=win_ca_h(w);
     gui_fill_rect(cx,cy,cw,ch,COL_WIN_BG);
@@ -2989,6 +3456,7 @@ static void render_app(Window *w, int32_t mx, int32_t my, uint8_t click, uint8_t
     case APP_LOGVIEWER:   render_logviewer(w,mx,my,click);  break;
     case APP_ABOUT:       render_about(w,mx,my,click);      break;
     case APP_SETTINGS:    render_settings(w,mx,my,click);   break;
+    case APP_USERS:       render_users(w,mx,my,click);      break;
     case APP_SDK:
         // SDK-managed window: the app draws its own content via syscalls
         // after gui_pump() yields to it (step 3b in gui_pump).
@@ -3190,8 +3658,14 @@ void gui_run(void) {
     apply_theme(THEME_MODERN);
     settings_load();
 
-    // Open terminal on startup
-    open_window(APP_TERMINAL);
+    // Load user database
+    udb_load();
+    // If no users exist, skip login and go straight to desktop
+    g_login_done = (g_udb.count == 0) ? 1 : 0;
+    g_login_sel  = 0;
+
+    // Open terminal on startup (after login)
+    if (g_login_done) open_window(APP_TERMINAL);
 
     for (;;) {
         gui_pump();
@@ -3227,6 +3701,22 @@ void gui_pump(void) {
         uint8_t click   = (btn && !prev_btn);
         uint8_t release = (!btn && prev_btn);
         uint8_t rclick  = (rbtn && !prev_rbtn);
+
+        // ---- Login screen (shown before desktop if users exist) ----
+        if (!g_login_done) {
+            static uint8_t login_prev_btn = 0;
+            uint8_t login_click = (btn && !login_prev_btn);
+            login_prev_btn = btn;
+            render_login_screen(mx, my, login_click);
+            // Draw cursor on top
+            gui_fill_rect(mx, my, 2, 10, RGB(255,255,255));
+            gui_fill_rect(mx, my, 10, 2, RGB(255,255,255));
+            bb_present();
+            sched_yield();
+            prev_btn = btn;
+            prev_rbtn = rbtn;
+            return;
+        }
 
         // ---- Drag update ----
         // Snapshot SDK window content-area origins BEFORE moving them.

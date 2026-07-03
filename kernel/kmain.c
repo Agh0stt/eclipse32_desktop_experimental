@@ -193,10 +193,8 @@ void kmain(boot_info_t *boot_info) {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 6.5: Boot splash + F-key hotkeys (F1 upload mode, F2 boot menu,
-    // F3 force text mode, F4 software update, F5 reserved)
+    // Phase 6.5: Boot splash
     // -------------------------------------------------------------------------
-    bootmenu_result_t bm_result = BOOTMENU_CONTINUE;
     if (vbe_active()) {
         vbe_clear(ECLIPSE_BG);
         vbe_set_text_color(ECLIPSE_ACCENT, 0x00000000);
@@ -206,15 +204,12 @@ void kmain(boot_info_t *boot_info) {
         vbe_set_cursor(2, 2);
         vbe_puts("32-bit Protected Mode Operating System");
         vbe_draw_line(0, 3 * 16 + 4, vbe_get_width(), 3 * 16 + 4, ECLIPSE_ACCENT);
-
-        bm_result = bootmenu_check();
     }
 
     // -------------------------------------------------------------------------
-    // Phase 7: Launch EclipseGUI (or VGA text mode if F3 was pressed, or VBE
-    // simply isn't available)
+    // Phase 7: Launch EclipseGUI (or VGA text mode if VBE isn't available)
     // -------------------------------------------------------------------------
-    if (vbe_active() && bm_result != BOOTMENU_FORCE_TEXT) {
+    if (vbe_active()) {
         vga_puts("[INIT] Initialising scheduler...\n");
         sched_init();
         vga_puts("[INIT] Initialising GUI App SDK...\n");
