@@ -93,6 +93,8 @@ KERNEL_SRCS := \
     $(KERNEL_DIR)/net/icmp.c \
     $(KERNEL_DIR)/net/udp.c \
     $(KERNEL_DIR)/net/dns.c \
+    $(KERNEL_DIR)/net/tcp.c \
+    $(KERNEL_DIR)/net/http.c \
     $(KERNEL_DIR)/fs/fat32/fat32.c \
     $(KERNEL_DIR)/syscall/syscall.c \
     $(KERNEL_DIR)/exec/e32_loader.c \
@@ -103,7 +105,8 @@ KERNEL_SRCS := \
     $(KERNEL_DIR)/gui/gui_desktop.c \
     $(KERNEL_DIR)/gui/gui_sdk.c \
     $(KERNEL_DIR)/sched/sched.c \
-    $(KERNEL_DIR)/libk/kmath.c
+    $(KERNEL_DIR)/libk/kmath.c \
+    $(KERNEL_DIR)/bootmenu/bootmenu.c
 
 # --- Kernel ASM sources ---
 KERNEL_ASM_SRCS := \
@@ -145,6 +148,24 @@ $(BUILD)/%.o: %.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	@echo "[CC  ] $<"
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# sched.c uses __builtin_setjmp/__builtin_longjmp as a repeated coroutine
+# yield point (sched_yield() is called many times per shell command, from
+# inside tcp.c's networking wait loops). Clang's __builtin_setjmp/longjmp
+# are designed around single-shot C++-style exception unwinding; at -O2
+# the optimizer can keep live values in registers across the setjmp call
+# site under assumptions that don't hold for this repeated-yield pattern,
+# which corrupts register state across the jump. This manifested as a
+# crash to a garbage EIP (observed via GDB: an address far outside valid
+# physical RAM) once render_terminal started pumping sched_yield() every
+# frame instead of once per command -- a call-frequency increase that
+# exposed a latent miscompilation that was never exercised before.
+# Building this one file at -O0 with inlining disabled avoids the issue
+# without touching the rest of the kernel's optimization level.
+$(BUILD)/kernel/sched/sched.o: kernel/sched/sched.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	@echo "[CC  ] $< (forced -O0, see Makefile comment)"
+	$(CC) $(filter-out -O2,$(CFLAGS)) -O0 -fno-inline -c -o $@ $<
 
 $(BUILD)/%.asm.o: %.asm | $(BUILD)
 	@mkdir -p $(dir $@)

@@ -1,0 +1,78 @@
+--- kernel/net/tcp.c	2026-06-24 09:58:33.000000000 +0000
++++ kernel/net/tcp.c	2026-06-24 10:07:44.620599574 +0000
+@@ -181,20 +181,37 @@
+ }
+ 
+ // Try to drain consecutive buffered segments starting at g_ack.
++// IMPORTANT: a segment is only consumed (and g_ack advanced) if the recv
++// ring has room for the *entire* segment. Partially draining a segment
++// (old behavior: clamp to available space, advance g_ack by the clamped
++// amount, then discard the slot anyway) silently dropped the undelivered
++// tail bytes and desynced g_ack from what was actually buffered -- any
++// later segment from the real next sequence number would then look
++// "ahead" of g_ack and get stashed instead of delivered, with nothing
++// left in g_ooo at the (now permanently wrong) g_ack value to drain it.
++// That manifested as the connection hanging silently under SLIRP/NAT
++// reordering once the recv ring got close to full during a download.
+ static void ooo_drain(void) {
+     bool progress = true;
+     while (progress) {
+         progress = false;
+         for (int i = 0; i < OOO_SLOTS; i++) {
+             if (!g_ooo[i].valid) continue;
+-            if (g_ooo[i].seq == g_ack) {
+-                uint16_t space = (uint16_t)(TCP_RECV_BUF_SIZE - g_recv_count);
+-                uint16_t take  = g_ooo[i].len < space ? g_ooo[i].len : space;
+-                recv_push(g_ooo[i].data, take);
+-                g_ack += take;
+-                g_ooo[i].valid = false;
+-                progress = true;
++            if (g_ooo[i].seq != g_ack) continue;
++
++            uint16_t space = (uint16_t)(TCP_RECV_BUF_SIZE - g_recv_count);
++            if (g_ooo[i].len > space) {
++                // Not enough room yet -- leave it buffered and stop. The
++                // app will free up ring space via tcp_recv(), and we'll
++                // retry on the next ooo_drain() call (e.g. next packet
++                // or next tcp_tick()).
++                continue;
+             }
++
++            recv_push(g_ooo[i].data, g_ooo[i].len);
++            g_ack += g_ooo[i].len;
++            g_ooo[i].valid = false;
++            progress = true;
+         }
+     }
+ }
+@@ -254,13 +271,24 @@
+         // Accept data: in-order gets pushed directly; out-of-order gets buffered.
+         if (payload_len > 0) {
+             if (seg_seq == g_ack) {
+-                // In-order: push directly into recv ring
++                // In-order: push directly into recv ring, but only if the
++                // ring has room for the whole segment. Same reasoning as
++                // ooo_drain() above -- clamping and advancing g_ack by less
++                // than payload_len would silently drop the tail and desync
++                // g_ack from the data we actually have. If there isn't
++                // room, drop the segment untouched; TCP_RECV_BUF_SIZE -
++                // g_recv_count is advertised as our window (see
++                // tcp_send_segment), so a well-behaved peer/SLIRP won't
++                // send more than that -- and if it does anyway, our
++                // retransmit timer / lack of ACK will make it resend once
++                // tcp_recv() drains the ring and frees up space.
+                 uint16_t space = (uint16_t)(TCP_RECV_BUF_SIZE - g_recv_count);
+-                uint16_t take  = payload_len < space ? payload_len : space;
+-                recv_push(payload, take);
+-                g_ack += take;
+-                // Now try to drain any buffered segments that are now in order
+-                ooo_drain();
++                if (payload_len <= space) {
++                    recv_push(payload, payload_len);
++                    g_ack += payload_len;
++                    // Now try to drain any buffered segments that are now in order
++                    ooo_drain();
++                }
+             } else if (seg_seq > g_ack) {
+                 // Future segment — stash it for later (handles NAT reordering)
+                 ooo_store(seg_seq, payload, payload_len);

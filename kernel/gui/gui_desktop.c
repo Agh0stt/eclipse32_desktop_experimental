@@ -2540,10 +2540,34 @@ static void render_terminal(Window *w, int32_t mx, int32_t my, uint8_t click, ui
     // Blinking cursor
     if((get_ticks()/50)%2==0) gui_fill_rect(tx,ty,FONT_W,FONT_H,COL_TERM_TXT);
 
+    // If an app is running, pump it forward every frame regardless of
+    // window focus -- a backgrounded `get` shouldn't freeze just because
+    // the user clicked another window. Keyboard input below still
+    // requires focus (active), but the scheduler resume must not.
+    //
+    // Bug history: previously the only sched_yield() into TASK_APP happened
+    // once, inside the Enter-key handler below, via sched_run_app(). That
+    // call returns to here as soon as the app itself calls sched_yield()
+    // for ANY reason -- e.g. every wait loop in tcp_send()/tcp_recv()/
+    // poll_until() in tcp.c calls "if (sched_app_running()) sched_yield();"
+    // on every iteration. The first time a shell builtin like `get` hit one
+    // of those loops, control returned here mid-frame with the app still
+    // runnable (not finished) -- and nothing ever called sched_yield()
+    // again, since that only happened at the top of the Enter-key handler
+    // (a new command) or in the g_sdk_app_active branch (APP_SDK windows
+    // only, not plain terminal builtins). So the app was parked forever:
+    // no crash, no spin, the GUI kept rendering fine every frame (which is
+    // why pit_ms()/networking IRQs kept working), but the command's own
+    // execution never resumed. From the user's perspective this looked
+    // exactly like a freeze right after "[HTTP] Connected", since that was
+    // the last output printed before the first yield deep in tcp_send().
+    if (w->st.term_app_running && sched_app_running()) {
+        sched_yield();
+    }
+
     // Keyboard input: only read keys when this terminal window is active/front
     if(!active) return;
 
-    // If an app is running, feed keys into its stdin ring buffer
     if(w->st.term_app_running){
         char kc=kb_getchar_nowait();
         if(kc) term_inbuf_push(w, kc);

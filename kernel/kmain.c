@@ -26,6 +26,7 @@
 #include "../gui/gui_desktop.h"
 #include "../gui/gui_sdk.h"
 #include "../sched/sched.h"
+#include "bootmenu/bootmenu.h"
 
 // Defined in linker script
 extern uint32_t kernel_start;
@@ -37,6 +38,7 @@ static boot_info_t *g_boot_info = NULL;
 // Kernel panic - halt with message
 // =============================================================================
 void kpanic(const char *msg) {
+    bootmenu_record_panic(msg);
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_RED);
     vga_puts("\n\n[KERNEL PANIC] ");
     vga_puts(msg);
@@ -109,7 +111,7 @@ void kmain(boot_info_t *boot_info) {
     vmm_init(boot_info);
 
     vga_puts("[INIT] Initializing Heap (kmalloc/kfree)...\n");
-    heap_init(0xC0000000, 4 * 1024 * 1024);  // 4MB heap at 0xC0000000
+    heap_init(mem_start_aligned, 16 * 1024 * 1024);  // 4MB heap at 0xC0000000
 
     // -------------------------------------------------------------------------
     // Phase 4: Device Drivers
@@ -191,9 +193,28 @@ void kmain(boot_info_t *boot_info) {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 7: Launch EclipseGUI
+    // Phase 6.5: Boot splash + F-key hotkeys (F1 upload mode, F2 boot menu,
+    // F3 force text mode, F4 software update, F5 reserved)
     // -------------------------------------------------------------------------
+    bootmenu_result_t bm_result = BOOTMENU_CONTINUE;
     if (vbe_active()) {
+        vbe_clear(ECLIPSE_BG);
+        vbe_set_text_color(ECLIPSE_ACCENT, 0x00000000);
+        vbe_set_cursor(2, 1);
+        vbe_puts("Eclipse32  v0.1.0 - ALPHA");
+        vbe_set_text_color(ECLIPSE_FG, 0x00000000);
+        vbe_set_cursor(2, 2);
+        vbe_puts("32-bit Protected Mode Operating System");
+        vbe_draw_line(0, 3 * 16 + 4, vbe_get_width(), 3 * 16 + 4, ECLIPSE_ACCENT);
+
+        bm_result = bootmenu_check();
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 7: Launch EclipseGUI (or VGA text mode if F3 was pressed, or VBE
+    // simply isn't available)
+    // -------------------------------------------------------------------------
+    if (vbe_active() && bm_result != BOOTMENU_FORCE_TEXT) {
         vga_puts("[INIT] Initialising scheduler...\n");
         sched_init();
         vga_puts("[INIT] Initialising GUI App SDK...\n");

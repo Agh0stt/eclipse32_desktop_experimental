@@ -18,6 +18,7 @@
 #include "../kernel/net/net.h"
 #include "../kernel/net/icmp.h"
 #include "../kernel/net/dns.h"
+#include "../kernel/net/http.h"
 #include "../kernel/drivers/net/rtl8139.h"
 #include "../kernel/sched/sched.h"
 
@@ -1505,6 +1506,101 @@ static void builtin_nslookup(cmd_t *cmd) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// get <url> [dest]  — download a file (like wget)
+// -----------------------------------------------------------------------------
+static void builtin_get(cmd_t *cmd) {
+    if (cmd->argc < 2) {
+        tprintf("usage: get <url> [dest]\n");
+        last_exit_code = 1;
+        return;
+    }
+    if (!rtl8139_present()) {
+        term_set_color(TC_RED);
+        tprintf("get: no network interface\n");
+        term_reset();
+        last_exit_code = 1;
+        return;
+    }
+
+    const char *url = cmd->args[1];
+
+    char dest[SHELL_MAX_PATH];
+    if (cmd->argc >= 3) {
+        path_resolve(cmd->args[2], dest);
+    } else {
+        const char *slash = url + kstrlen(url);
+        while (slash > url && *slash != '/') slash--;
+        if (*slash == '/') slash++;
+        if (*slash == '\0') {
+            kstrcpy(dest, "/index.html");
+        } else {
+            dest[0] = '/';
+            kstrcpy(dest + 1, slash);
+        }
+    }
+
+    tprintf("get: %s -> %s\n", url, dest);
+
+    if (http_get_to_file(url, dest, true) == 0) {
+        term_set_color(TC_GREEN);
+        tprintf("get: saved to %s\n", dest);
+        term_reset();
+        last_exit_code = 0;
+    } else {
+        term_set_color(TC_RED);
+        tprintf("get: failed\n");
+        term_reset();
+        last_exit_code = 1;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// getpkg <url>  — download a .ins package and install it
+// -----------------------------------------------------------------------------
+static void builtin_getpkg(cmd_t *cmd) {
+    if (cmd->argc < 2) {
+        tprintf("usage: getpkg <url>\n");
+        last_exit_code = 1;
+        return;
+    }
+    if (!rtl8139_present()) {
+        term_set_color(TC_RED);
+        tprintf("getpkg: no network interface\n");
+        term_reset();
+        last_exit_code = 1;
+        return;
+    }
+
+    const char *url = cmd->args[1];
+    const char *tmp = "/tmp/pkg_download.ins";
+
+    tprintf("getpkg: fetching %s\n", url);
+    if (http_get_to_file(url, tmp, true) != 0) {
+        term_set_color(TC_RED);
+        tprintf("getpkg: download failed\n");
+        term_reset();
+        last_exit_code = 1;
+        return;
+    }
+
+    tprintf("getpkg: installing...\n");
+    int rc = ins_install_from_file(tmp);
+    fat32_delete(tmp);
+
+    if (rc == 0) {
+        term_set_color(TC_GREEN);
+        tprintf("getpkg: installed OK\n");
+        term_reset();
+        last_exit_code = 0;
+    } else {
+        term_set_color(TC_RED);
+        tprintf("getpkg: install failed (code %d)\n", rc);
+        term_reset();
+        last_exit_code = 1;
+    }
+}
+
 static void builtin_beep(cmd_t *cmd){
     uint32_t hz = 880;
     uint32_t ms = 120;
@@ -1616,7 +1712,7 @@ static bool is_builtin(const char *n){
     static const char *b[]={"help","echo","cd","pwd","ls","cat","touch","mkdir","rm","cp","mv",
         "env","export","set","unset","alias","unalias","history","clear","uname","uptime","free",
         "date","sleep","beep","wc","which","source","exit","reboot","halt","true","false","write","ed",
-        "install","head","tail","stat","hexdump","basename","dirname","version","len","arch","hostname","wavplay","ping","nslookup",NULL};
+        "install","head","tail","stat","hexdump","basename","dirname","version","len","arch","hostname","wavplay","ping","nslookup","get","getpkg",NULL};
     for(int i=0;b[i];i++) if(kstrcmp(n,b[i])==0) return true;
     return false;
 }
@@ -1675,6 +1771,8 @@ static int run_builtin(cmd_t *cmd){
     else if(kstrcmp(n,"install")==0)  builtin_install_cmd(cmd);
     else if(kstrcmp(n,"ping")==0)     {builtin_ping(cmd);return last_exit_code;}
     else if(kstrcmp(n,"nslookup")==0) {builtin_nslookup(cmd);return last_exit_code;}
+    else if(kstrcmp(n,"get")==0)      {builtin_get(cmd);return last_exit_code;}
+    else if(kstrcmp(n,"getpkg")==0)   {builtin_getpkg(cmd);return last_exit_code;}
     else if(kstrcmp(n,"head")==0)     builtin_head(cmd);
     else if(kstrcmp(n,"tail")==0)     builtin_tail(cmd);
     else if(kstrcmp(n,"stat")==0)     builtin_stat_cmd(cmd);

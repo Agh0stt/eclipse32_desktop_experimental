@@ -399,6 +399,10 @@ void syscall_set_output_cb(void (*cb)(const char *, void *), void *ud) {
     g_out_ud = ud;
 }
 
+void syscall_debug_puts(const char *s) {
+    if (g_out_cb) { g_out_cb(s, g_out_ud); } else { extern void vga_puts(const char *); vga_puts(s); }
+}
+
 void syscall_set_input_cb(int (*cb)(void *), void *ud) {
     g_in_cb = cb;
     g_in_ud = ud;

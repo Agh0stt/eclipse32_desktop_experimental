@@ -67,5 +67,6 @@ void syscall_set_app_image(const void *base, uint32_t size);
 void *syscall_translate_app_ptr(uint32_t raw_ptr, uint32_t len);
 void syscall_set_app_heap(uint32_t brk_base, uint32_t brk_limit);
 void syscall_set_output_cb(void (*cb)(const char *, void *), void *ud);
+void syscall_debug_puts(const char *s);
 void syscall_set_input_cb(int (*cb)(void *), void *ud);
 key_event_t syscall_wait_key(void);  // GUI-aware blocking key read (yields in GUI mode)
