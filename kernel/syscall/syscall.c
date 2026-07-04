@@ -9,7 +9,7 @@
 #include "../initramfs/initramfs.h"
 #include "../sched/sched.h"
 
-#define SYSCALL_TABLE_SIZE 64
+#define SYSCALL_TABLE_SIZE 128
 #define READDIR_SCRATCH_MAX 64
 
 static volatile bool g_app_exit_requested = false;

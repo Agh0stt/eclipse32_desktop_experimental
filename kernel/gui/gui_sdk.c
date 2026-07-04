@@ -51,6 +51,9 @@ extern void        gui_desktop_sdk_getrect(int32_t win_idx, int32_t *ox, int32_t
 // Mouse state lives in gui_desktop.c / gui_compat.h
 extern MouseState  g_mouse;
 
+// Forward declaration for extended syscalls (defined later in this file)
+void gui_sdk_register_extended_syscalls(void);
+
 // ---------------------------------------------------------------------------
 // Pointer validation  (flat 32-bit, no MMU)
 // Reject NULL and the zero page only. Apps link at 0x0 so their rodata
@@ -327,4 +330,368 @@ void gui_sdk_register_syscalls(void) {
     syscall_register(SYS_GUI_DRAW_3DBOX,   sys_gui_draw_3dbox);
     syscall_register(SYS_GUI_SCREEN_SIZE,  sys_gui_screen_size);
     syscall_register(SYS_GUI_WIN_GETRECT,  sys_gui_win_getrect);
+    gui_sdk_register_extended_syscalls();
+}
+
+// =============================================================================
+// Extended widget syscall implementations
+// =============================================================================
+
+extern uint32_t pit_ticks(void);
+
+// ---------------------------------------------------------------------------
+// Circle drawing helpers (midpoint algorithm)
+// ---------------------------------------------------------------------------
+static void sdk_fill_circle(int32_t cx, int32_t cy, int32_t r, uint32_t col) {
+    if (r <= 0) return;
+    int32_t x = 0, y = r, d = 1 - r;
+    while (x <= y) {
+        gui_draw_hline(cx - y, cy - x, 2*y+1, col);
+        gui_draw_hline(cx - y, cy + x, 2*y+1, col);
+        gui_draw_hline(cx - x, cy - y, 2*x+1, col);
+        gui_draw_hline(cx - x, cy + y, 2*x+1, col);
+        if (d < 0) { d += 2*x + 3; }
+        else       { d += 2*(x-y) + 5; y--; }
+        x++;
+    }
+}
+
+static void sdk_draw_circle(int32_t cx, int32_t cy, int32_t r, uint32_t col) {
+    if (r <= 0) return;
+    int32_t x = 0, y = r, d = 1 - r;
+    while (x <= y) {
+        // 8-way symmetry
+        gui_putc(cx+x, cy-y, ' ', col, col);
+        gui_putc(cx-x, cy-y, ' ', col, col);
+        gui_putc(cx+x, cy+y, ' ', col, col);
+        gui_putc(cx-x, cy+y, ' ', col, col);
+        gui_putc(cx+y, cy-x, ' ', col, col);
+        gui_putc(cx-y, cy-x, ' ', col, col);
+        gui_putc(cx+y, cy+x, ' ', col, col);
+        gui_putc(cx-y, cy+x, ' ', col, col);
+        // Use fill_rect 1x1 for pixel
+        gui_fill_rect(cx+x, cy-y, 1, 1, col);
+        gui_fill_rect(cx-x, cy-y, 1, 1, col);
+        gui_fill_rect(cx+x, cy+y, 1, 1, col);
+        gui_fill_rect(cx-x, cy+y, 1, 1, col);
+        gui_fill_rect(cx+y, cy-x, 1, 1, col);
+        gui_fill_rect(cx-y, cy-x, 1, 1, col);
+        gui_fill_rect(cx+y, cy+x, 1, 1, col);
+        gui_fill_rect(cx-y, cy+x, 1, 1, col);
+        if (d < 0) { d += 2*x + 3; }
+        else       { d += 2*(x-y) + 5; y--; }
+        x++;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SYS_GUI_FILL_CIRCLE  a0=cx a1=cy a2=r a3=col
+// ---------------------------------------------------------------------------
+static int32_t sys_gui_fill_circle(uint32_t a0, uint32_t a1, uint32_t a2,
+                                    uint32_t a3, uint32_t a4) {
+    (void)a4;
+    sdk_fill_circle((int32_t)a0, (int32_t)a1, (int32_t)a2, a3);
+    return 0;
+}
+
+// SYS_GUI_DRAW_CIRCLE  a0=cx a1=cy a2=r a3=col
+static int32_t sys_gui_draw_circle(uint32_t a0, uint32_t a1, uint32_t a2,
+                                    uint32_t a3, uint32_t a4) {
+    (void)a4;
+    sdk_draw_circle((int32_t)a0, (int32_t)a1, (int32_t)a2, a3);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// SYS_GUI_DRAW_IMAGE  a0=ptr→gui_image_args_t
+// ---------------------------------------------------------------------------
+static int32_t sys_gui_draw_image(uint32_t a0, uint32_t a1, uint32_t a2,
+                                   uint32_t a3, uint32_t a4) {
+    (void)a1; (void)a2; (void)a3; (void)a4;
+    gui_image_args_t *a = (gui_image_args_t *)syscall_translate_app_ptr(a0, sizeof(gui_image_args_t));
+    if (!ptr_ok(a)) return -1;
+    const uint32_t *pixels = (const uint32_t *)syscall_translate_app_ptr((uint32_t)a->pixels,
+                                                (uint32_t)(a->w * a->h * 4));
+    if (!ptr_ok(pixels)) return -1;
+    int32_t x = a->x, y = a->y, w = a->w, h = a->h;
+    for (int32_t row = 0; row < h; row++) {
+        for (int32_t col = 0; col < w; col++) {
+            uint32_t px = pixels[row * w + col];
+            // Skip fully transparent pixels (top byte = 0)
+            if ((px >> 24) == 0) continue;
+            gui_fill_rect(x + col, y + row, 1, 1, px & 0x00FFFFFFu);
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// SYS_GUI_GET_TICKS  (no args) → uint32_t ms tick count
+// ---------------------------------------------------------------------------
+static int32_t sys_gui_get_ticks(uint32_t a0, uint32_t a1, uint32_t a2,
+                                  uint32_t a3, uint32_t a4) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4;
+    return (int32_t)pit_ticks();
+}
+
+// ---------------------------------------------------------------------------
+// SYS_GUI_INPUT  a0=ptr→gui_input_args_t
+// Draws the field, handles click-to-focus, feeds key, returns 1 on Enter.
+// ---------------------------------------------------------------------------
+#define SDK_FONT_W  8
+#define SDK_FONT_H  16
+
+static int32_t sys_gui_input(uint32_t a0, uint32_t a1, uint32_t a2,
+                              uint32_t a3, uint32_t a4) {
+    (void)a1; (void)a2; (void)a3; (void)a4;
+    gui_input_args_t *a = (gui_input_args_t *)syscall_translate_app_ptr(a0, sizeof(gui_input_args_t));
+    if (!ptr_ok(a)) return 0;
+    gui_input_t *inp = (gui_input_t *)syscall_translate_app_ptr((uint32_t)a->inp, sizeof(gui_input_t));
+    if (!ptr_ok(inp)) return 0;
+
+    int32_t x = a->x, y = a->y, w = a->w, h = a->h;
+    int32_t mx = a->mx, my = a->my;
+    uint8_t clicked = a->clicked;
+    char    key     = a->key;
+    int32_t maxlen  = inp->maxlen > 0 ? inp->maxlen : GUI_INPUT_MAXLEN;
+    if (maxlen > GUI_INPUT_MAXLEN) maxlen = GUI_INPUT_MAXLEN;
+
+    // Click to focus / unfocus
+    if (clicked) {
+        inp->focused = (uint8_t)(mx >= x && mx < x+w && my >= y && my < y+h);
+    }
+
+    // Draw background + border
+    uint32_t bg     = inp->focused ? 0x00FFFFFFu : 0x00E6E6E6u;
+    uint32_t border = inp->focused ? 0x003264C8u : 0x00969696u;
+    gui_fill_rect(x, y, w, h, bg);
+    // top/bottom/left/right border lines
+    gui_draw_hline(x,     y,     w, border);
+    gui_draw_hline(x,     y+h-1, w, border);
+    gui_draw_vline(x,     y,     h, border);
+    gui_draw_vline(x+w-1, y,     h, border);
+
+    // Draw content (masked if password)
+    int32_t len = 0;
+    while (inp->buf[len]) len++;
+    char disp[GUI_INPUT_MAXLEN + 1];
+    if (inp->masked) {
+        for (int32_t i = 0; i < len; i++) disp[i] = '*';
+    } else {
+        for (int32_t i = 0; i < len; i++) disp[i] = inp->buf[i];
+    }
+    disp[len] = 0;
+    gui_puts(x + 4, y + (h - SDK_FONT_H) / 2, disp, 0x00000000u, bg);
+
+    // Blinking cursor
+    if (inp->focused && (pit_ticks() / 30) % 2 == 0) {
+        int32_t cpos = x + 4 + len * SDK_FONT_W;
+        if (cpos < x + w - 4)
+            gui_fill_rect(cpos, y + (h - SDK_FONT_H)/2, 2, SDK_FONT_H, 0x000000C8u);
+    }
+
+    // Feed key
+    if (!inp->focused || key == 0) return 0;
+
+    if (key == '\b') {
+        if (len > 0) inp->buf[len - 1] = 0;
+    } else if (key == '\r' || key == '\n') {
+        return 1;   // signal Enter pressed
+    } else if (key == '\t') {
+        // Tab handled by caller (field cycling)
+    } else if (key >= 32 && key < 127) {
+        if (len < maxlen) { inp->buf[len] = key; inp->buf[len+1] = 0; }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// SYS_GUI_CHECKBOX  a0=ptr→gui_checkbox_args_t
+// Returns 1 if state was toggled this click.
+// ---------------------------------------------------------------------------
+#define CB_SIZE 13
+
+static int32_t sys_gui_checkbox(uint32_t a0, uint32_t a1, uint32_t a2,
+                                 uint32_t a3, uint32_t a4) {
+    (void)a1; (void)a2; (void)a3; (void)a4;
+    gui_checkbox_args_t *a = (gui_checkbox_args_t *)syscall_translate_app_ptr(a0, sizeof(gui_checkbox_args_t));
+    if (!ptr_ok(a)) return 0;
+    uint8_t *checked = (uint8_t *)syscall_translate_app_ptr((uint32_t)a->checked, 1);
+    if (!ptr_ok(checked)) return 0;
+    const char *label = (const char *)syscall_translate_app_ptr((uint32_t)a->label, 1);
+
+    int32_t x = a->x, y = a->y;
+    int32_t mx = a->mx, my = a->my;
+    uint8_t clicked = a->clicked;
+
+    // Box
+    gui_fill_rect(x, y, CB_SIZE, CB_SIZE, 0x00FFFFFFu);
+    gui_draw_hline(x,           y,            CB_SIZE, 0x00646464u);
+    gui_draw_hline(x,           y+CB_SIZE-1,  CB_SIZE, 0x00646464u);
+    gui_draw_vline(x,           y,            CB_SIZE, 0x00646464u);
+    gui_draw_vline(x+CB_SIZE-1, y,            CB_SIZE, 0x00646464u);
+
+    // Checkmark
+    if (*checked) {
+        // Simple tick: two lines forming a check
+        for (int32_t i = 0; i < 4; i++) {
+            gui_fill_rect(x + 2 + i, y + 5 + i, 2, 2, 0x00286428u);
+        }
+        for (int32_t i = 0; i < 5; i++) {
+            gui_fill_rect(x + 5 + i, y + 8 - i, 2, 2, 0x00286428u);
+        }
+    }
+
+    // Label
+    if (ptr_ok(label))
+        gui_puts(x + CB_SIZE + 5, y + (CB_SIZE - SDK_FONT_H)/2, label, 0x00202020u, 0x00ECE9D8u);
+
+    // Click detection
+    if (clicked && mx >= x && mx < x + CB_SIZE + 80 && my >= y && my < y + CB_SIZE) {
+        *checked ^= 1;
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// SYS_GUI_SLIDER  a0=ptr→gui_slider_args_t
+// Returns 1 if value changed.
+// ---------------------------------------------------------------------------
+#define SLIDER_H     14
+#define THUMB_W      10
+
+static int32_t sys_gui_slider(uint32_t a0, uint32_t a1, uint32_t a2,
+                               uint32_t a3, uint32_t a4) {
+    (void)a1; (void)a2; (void)a3; (void)a4;
+    gui_slider_args_t *a = (gui_slider_args_t *)syscall_translate_app_ptr(a0, sizeof(gui_slider_args_t));
+    if (!ptr_ok(a)) return 0;
+    int32_t *value = (int32_t *)syscall_translate_app_ptr((uint32_t)a->value, sizeof(int32_t));
+    if (!ptr_ok(value)) return 0;
+
+    int32_t x = a->x, y = a->y, w = a->w;
+    int32_t mn = a->min_val, mx_val = a->max_val;
+    int32_t mx = a->mx, my = a->my;
+    uint8_t buttons = a->buttons;
+
+    if (mx_val <= mn) mx_val = mn + 1;
+    int32_t range = mx_val - mn;
+
+    // Track
+    int32_t ty = y + (SLIDER_H - 4) / 2;
+    gui_fill_rect(x, ty, w, 4, 0x00C8C8C8u);
+    gui_draw_hline(x,   ty,   w, 0x00969696u);
+    gui_draw_hline(x,   ty+3, w, 0x00969696u);
+
+    // Thumb position
+    int32_t thumb_x = x + ((*value - mn) * (w - THUMB_W)) / range;
+    if (thumb_x < x) thumb_x = x;
+    if (thumb_x > x + w - THUMB_W) thumb_x = x + w - THUMB_W;
+
+    // Filled track up to thumb
+    gui_fill_rect(x, ty, thumb_x - x + THUMB_W/2, 4, 0x004682C8u);
+
+    // Thumb
+    uint8_t hover = (mx >= thumb_x && mx < thumb_x + THUMB_W &&
+                     my >= y      && my < y + SLIDER_H);
+    uint32_t thumb_col = hover ? 0x005A96DCu : 0x004682C8u;
+    gui_fill_rect(thumb_x, y, THUMB_W, SLIDER_H, thumb_col);
+    gui_draw_hline(thumb_x,            y,              THUMB_W, 0x00284896u);
+    gui_draw_hline(thumb_x,            y + SLIDER_H-1, THUMB_W, 0x00284896u);
+    gui_draw_vline(thumb_x,            y,              SLIDER_H, 0x00284896u);
+    gui_draw_vline(thumb_x+THUMB_W-1,  y,              SLIDER_H, 0x00284896u);
+
+    // Drag: if left button held and mouse over track area
+    if ((buttons & 1) && my >= y && my < y + SLIDER_H &&
+        mx >= x && mx < x + w) {
+        int32_t new_val = mn + ((mx - x - THUMB_W/2) * range) / (w - THUMB_W);
+        if (new_val < mn) new_val = mn;
+        if (new_val > mx_val) new_val = mx_val;
+        if (new_val != *value) { *value = new_val; return 1; }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// SYS_GUI_MSGBOX  a0=ptr→gui_msgbox_args_t
+// Blocking modal — pumps frames until user clicks OK or Cancel.
+// Returns 1 for OK, 0 for Cancel.
+// ---------------------------------------------------------------------------
+static int32_t sys_gui_msgbox(uint32_t a0, uint32_t a1, uint32_t a2,
+                               uint32_t a3, uint32_t a4) {
+    (void)a1; (void)a2; (void)a3; (void)a4;
+    gui_msgbox_args_t *a = (gui_msgbox_args_t *)syscall_translate_app_ptr(a0, sizeof(gui_msgbox_args_t));
+    if (!ptr_ok(a)) return 1;
+
+    const char *title   = (const char *)syscall_translate_app_ptr((uint32_t)a->title,   1);
+    const char *message = (const char *)syscall_translate_app_ptr((uint32_t)a->message, 1);
+    uint8_t has_cancel  = a->has_cancel;
+
+    if (!ptr_ok(title))   title   = "Notice";
+    if (!ptr_ok(message)) message = "";
+
+    // Measure message length for width
+    int32_t mlen = 0;
+    while (message[mlen]) mlen++;
+    int32_t dlg_w = mlen * SDK_FONT_W + 40;
+    if (dlg_w < 180) dlg_w = 180;
+    if (dlg_w > 400) dlg_w = 400;
+    int32_t dlg_h = 90;
+
+    // Center on screen
+    int32_t dlg_x = (800 - dlg_w) / 2;
+    int32_t dlg_y = (600 - dlg_h) / 2;
+
+    while (1) {
+        // Draw dialog
+        // Shadow
+        gui_fill_rect(dlg_x+3, dlg_y+3, dlg_w, dlg_h, 0x00808080u);
+        // Body
+        gui_fill_rect(dlg_x, dlg_y, dlg_w, dlg_h, 0x00ECE9D8u);
+        // Title bar
+        gui_fill_rect(dlg_x, dlg_y, dlg_w, 20, 0x000A246Au);
+        gui_puts(dlg_x + 6, dlg_y + 3, title, 0x00FFFFFFu, 0x000A246Au);
+        // Border
+        gui_draw_hline(dlg_x,          dlg_y,          dlg_w, 0x00808080u);
+        gui_draw_hline(dlg_x,          dlg_y+dlg_h-1,  dlg_w, 0x00808080u);
+        gui_draw_vline(dlg_x,          dlg_y,           dlg_h, 0x00808080u);
+        gui_draw_vline(dlg_x+dlg_w-1,  dlg_y,           dlg_h, 0x00808080u);
+        // Message
+        gui_puts(dlg_x + 12, dlg_y + 30, message, 0x00000000u, 0x00ECE9D8u);
+
+        // Buttons
+        gui_mouse_t m;
+        m.x = g_mouse.x; m.y = g_mouse.y; m.buttons = g_mouse.buttons;
+        uint8_t click = (m.buttons & 1) ? 1 : 0;
+
+        int32_t btn_y = dlg_y + dlg_h - 26;
+
+        if (has_cancel) {
+            int32_t ok_x  = dlg_x + dlg_w/2 - 80;
+            int32_t cxl_x = dlg_x + dlg_w/2 + 8;
+            if (gui_button(ok_x,  btn_y, 64, 18, "OK",     m.x, m.y, click)) return 1;
+            if (gui_button(cxl_x, btn_y, 64, 18, "Cancel", m.x, m.y, click)) return 0;
+        } else {
+            int32_t ok_x = dlg_x + (dlg_w - 64) / 2;
+            if (gui_button(ok_x, btn_y, 64, 18, "OK", m.x, m.y, click)) return 1;
+        }
+
+        // Pump a frame
+        sched_yield();
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Register new syscalls
+// ---------------------------------------------------------------------------
+void gui_sdk_register_extended_syscalls(void) {
+    syscall_register(SYS_GUI_INPUT,       sys_gui_input);
+    syscall_register(SYS_GUI_CHECKBOX,    sys_gui_checkbox);
+    syscall_register(SYS_GUI_SLIDER,      sys_gui_slider);
+    syscall_register(SYS_GUI_MSGBOX,      sys_gui_msgbox);
+    syscall_register(SYS_GUI_GET_TICKS,   sys_gui_get_ticks);
+    syscall_register(SYS_GUI_FILL_CIRCLE, sys_gui_fill_circle);
+    syscall_register(SYS_GUI_DRAW_CIRCLE, sys_gui_draw_circle);
+    syscall_register(SYS_GUI_DRAW_IMAGE,  sys_gui_draw_image);
 }

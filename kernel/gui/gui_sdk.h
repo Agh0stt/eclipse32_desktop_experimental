@@ -72,3 +72,60 @@ typedef struct {
 // ---------------------------------------------------------------------------
 void gui_sdk_init(void);             // zero state; call before gui_run()
 void gui_sdk_register_syscalls(void); // plug into syscall_table[]
+
+// =============================================================================
+// Extended syscall numbers (must mirror apps/sdk/e32_gui.h)
+// =============================================================================
+#define SYS_GUI_INPUT        36
+#define SYS_GUI_CHECKBOX     37
+#define SYS_GUI_SLIDER       38
+#define SYS_GUI_MSGBOX       39
+#define SYS_GUI_GET_TICKS    40
+#define SYS_GUI_FILL_CIRCLE  41
+#define SYS_GUI_DRAW_CIRCLE  42
+#define SYS_GUI_DRAW_IMAGE   43
+
+#define GUI_INPUT_MAXLEN  127
+
+// Kernel-side mirror structs (PACKED, must match app-side exactly)
+typedef struct {
+    char     buf[GUI_INPUT_MAXLEN + 1];
+    uint8_t  focused;
+    uint8_t  masked;
+    int32_t  maxlen;
+} PACKED gui_input_t;
+
+typedef struct {
+    int32_t      x, y, w, h;
+    gui_input_t *inp;
+    int32_t      mx, my;
+    uint8_t      clicked;
+    char         key;
+} PACKED gui_input_args_t;
+
+typedef struct {
+    int32_t      x, y;
+    const char  *label;
+    uint8_t     *checked;
+    int32_t      mx, my;
+    uint8_t      clicked;
+} PACKED gui_checkbox_args_t;
+
+typedef struct {
+    int32_t  x, y, w;
+    int32_t  min_val, max_val;
+    int32_t *value;
+    int32_t  mx, my;
+    uint8_t  buttons;
+} PACKED gui_slider_args_t;
+
+typedef struct {
+    const char *title;
+    const char *message;
+    uint8_t     has_cancel;
+} PACKED gui_msgbox_args_t;
+
+typedef struct {
+    int32_t        x, y, w, h;
+    const uint32_t *pixels;
+} PACKED gui_image_args_t;
