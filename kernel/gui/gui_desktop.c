@@ -809,12 +809,23 @@ static inline uint8_t hit_win(Window *w, int32_t px, int32_t py) {
     return pt_in(px, py, w->x, w->y, w->w, w->h);
 }
 static inline uint8_t hit_title(Window *w, int32_t px, int32_t py) {
+    // Exclude all 3 buttons (close + maximize + minimize) on the right
     return pt_in(px, py, w->x+BORDER_W, w->y+BORDER_W,
-                 w->w-2*BORDER_W-TITLE_BAR_H, TITLE_BAR_H);
+                 w->w-2*BORDER_W-3*TITLE_BAR_H-2, TITLE_BAR_H);
 }
 static inline uint8_t hit_close(Window *w, int32_t px, int32_t py) {
     return pt_in(px, py,
         w->x+w->w-BORDER_W-TITLE_BAR_H, w->y+BORDER_W,
+        TITLE_BAR_H, TITLE_BAR_H);
+}
+static inline uint8_t hit_maximize(Window *w, int32_t px, int32_t py) {
+    return pt_in(px, py,
+        w->x+w->w-BORDER_W-2*TITLE_BAR_H-1, w->y+BORDER_W,
+        TITLE_BAR_H, TITLE_BAR_H);
+}
+static inline uint8_t hit_minimize(Window *w, int32_t px, int32_t py) {
+    return pt_in(px, py,
+        w->x+w->w-BORDER_W-3*TITLE_BAR_H-2, w->y+BORDER_W,
         TITLE_BAR_H, TITLE_BAR_H);
 }
 
@@ -1008,16 +1019,36 @@ static void draw_chrome(Window *w, uint8_t active) {
         uint32_t c = (row < TITLE_BAR_H/2) ? tc1 : tc2;
         gui_draw_hline(tbar_x, tbar_y+row, tbar_w-TITLE_BAR_H-1, c);
     }
-    // Title text
+    // Title text (clipped to leave room for 3 buttons)
     gui_puts_clip(tbar_x+5, tbar_y+(TITLE_BAR_H-FONT_H)/2,
                   w->title, RGB(255,255,255), tc1,
-                  tbar_x+3, tbar_y, tbar_w-TITLE_BAR_H-6, TITLE_BAR_H);
-    // Close button [x] — red on hover otherwise dark
+                  tbar_x+3, tbar_y, tbar_w-3*TITLE_BAR_H-8, TITLE_BAR_H);
+    // Close button [x] — rightmost
     int32_t bx = x+ww-BORDER_W-TITLE_BAR_H;
     int32_t by = y+BORDER_W;
     gui_fill_rect(bx, by, TITLE_BAR_H, TITLE_BAR_H, RGB(180,50,50));
     gui_draw_rect_border(bx, by, TITLE_BAR_H, TITLE_BAR_H, RGB(220,80,80), RGB(130,30,30));
     gui_puts(bx+5, by+(TITLE_BAR_H-FONT_H)/2, "x", RGB(255,255,255), RGB(180,50,50));
+    // Maximize button [ ] — middle
+    int32_t mx2 = bx - TITLE_BAR_H - 1;
+    uint8_t is_max = (w->flags & WIN_FLAG_MAXIMIZED) ? 1 : 0;
+    uint32_t max_bg = RGB(80,130,60);
+    gui_fill_rect(mx2, by, TITLE_BAR_H, TITLE_BAR_H, max_bg);
+    gui_draw_rect_border(mx2, by, TITLE_BAR_H, TITLE_BAR_H, RGB(120,180,90), RGB(50,90,40));
+    // Draw a square icon (restore = two overlapping squares, maximize = one square)
+    if (is_max) {
+        // restore icon: two small squares offset
+        gui_draw_rect_border(mx2+3, by+5, 8, 7, RGB(255,255,255), RGB(255,255,255));
+        gui_draw_rect_border(mx2+6, by+3, 8, 7, RGB(255,255,255), RGB(255,255,255));
+    } else {
+        gui_draw_rect_border(mx2+4, by+4, 10, 10, RGB(255,255,255), RGB(255,255,255));
+    }
+    // Minimize button [_] — leftmost of the three
+    int32_t mnx = mx2 - TITLE_BAR_H - 1;
+    uint32_t min_bg = RGB(160,130,40);
+    gui_fill_rect(mnx, by, TITLE_BAR_H, TITLE_BAR_H, min_bg);
+    gui_draw_rect_border(mnx, by, TITLE_BAR_H, TITLE_BAR_H, RGB(210,180,70), RGB(110,90,20));
+    gui_draw_hline(mnx+4, by+TITLE_BAR_H-5, TITLE_BAR_H-8, RGB(255,255,255));
     // Client sunken border
     int32_t cax=x+BORDER_W, cay=y+BORDER_W+TITLE_BAR_H+1;
     int32_t caw=ww-2*BORDER_W, cah=wh-(2*BORDER_W+TITLE_BAR_H+1);
@@ -3570,21 +3601,36 @@ static void draw_taskbar(int32_t mx, int32_t my, uint8_t click) {
     int32_t bx = (g_theme == THEME_CLASSIC) ? 60 : 78;
     for (int32_t i = 0; i < g_nwins && bx < SCREEN_W - 100; i++) {
         Window *w = &g_wins[i];
-        if (!(w->flags & WIN_FLAG_VISIBLE)) continue;
+        // Show both visible AND minimized windows in taskbar
+        if (!(w->flags & WIN_FLAG_VISIBLE) && !(w->flags & WIN_FLAG_MINIMIZED)) continue;
         int32_t bw = 110;
-        uint8_t active = (i == g_front);
+        uint8_t minimized = (w->flags & WIN_FLAG_MINIMIZED) ? 1 : 0;
+        uint8_t active = (i == g_front) && !minimized;
         uint8_t bhover = pt_in(mx,my,bx,ty+3,bw,TASKBAR_H-6);
         uint32_t wbg;
         if (g_theme == THEME_CLASSIC) {
-            wbg = COL_BUTTON_FACE;
+            wbg = minimized ? RGB(180,180,180) : COL_BUTTON_FACE;
             gui_fill_rect(bx, ty+3, bw, TASKBAR_H-6, wbg);
             gui_draw_3d_box(bx, ty+3, bw, TASKBAR_H-6, !active);
         } else {
-            wbg = active ? RGB(70,140,220) : (bhover ? RGB(65,65,65) : RGB(50,50,50));
+            wbg = minimized ? RGB(55,55,70)
+                : (active ? RGB(70,140,220) : (bhover ? RGB(65,65,65) : RGB(50,50,50)));
             gui_fill_rect(bx, ty+3, bw, TASKBAR_H-6, wbg);
-            if (active) gui_draw_hline(bx, ty+TASKBAR_H-4, bw, RGB(120,200,255));
+            if (active)   gui_draw_hline(bx, ty+TASKBAR_H-4, bw, RGB(120,200,255));
+            if (minimized) gui_draw_hline(bx, ty+TASKBAR_H-4, bw, RGB(180,180,100));
         }
-        if(click && bhover) { bring_front(i); g_startmenu=0; }
+        if (click && bhover) {
+            if (minimized) {
+                w->x = w->restore_x;
+                w->y = w->restore_y;
+                w->flags &= ~WIN_FLAG_MINIMIZED;
+                w->flags |= WIN_FLAG_VISIBLE;
+                bring_front(i);
+            } else {
+                bring_front(i);
+            }
+            g_startmenu = 0;
+        }
         char tb[14]; kstrncpy(tb, w->title, 13); tb[13]=0;
         uint32_t txt_col = (g_theme == THEME_CLASSIC) ? COL_BUTTON_TXT
                          : (active ? COL_WHITE : RGB(200,200,200));
@@ -3789,9 +3835,52 @@ void gui_pump(void) {
                         close_window(g_front);
                     goto after_click;
                 }
+                if (hit_maximize(fw,mx,my)) {
+                    if (fw->flags & WIN_FLAG_MAXIMIZED) {
+                        // Restore
+                        fw->x = fw->restore_x;
+                        fw->y = fw->restore_y;
+                        fw->w = fw->restore_w;
+                        fw->h = fw->restore_h;
+                        fw->flags &= ~WIN_FLAG_MAXIMIZED;
+                    } else {
+                        // Maximize — save current geometry first
+                        fw->restore_x = fw->x;
+                        fw->restore_y = fw->y;
+                        fw->restore_w = fw->w;
+                        fw->restore_h = fw->h;
+                        fw->x = 0;
+                        fw->y = DESKTOP_TOP_FOR(g_theme);
+                        fw->w = SCREEN_W;
+                        fw->h = SCREEN_H - TASKBAR_H;
+                        fw->flags |= WIN_FLAG_MAXIMIZED;
+                        // Clear minimized state if set
+                        fw->flags &= ~WIN_FLAG_MINIMIZED;
+                    }
+                    goto after_click;
+                }
+                if (hit_minimize(fw,mx,my)) {
+                    if (fw->flags & WIN_FLAG_MINIMIZED) {
+                        // Restore from minimize
+                        fw->x = fw->restore_x;
+                        fw->y = fw->restore_y;
+                        fw->flags &= ~WIN_FLAG_MINIMIZED;
+                        fw->flags |= WIN_FLAG_VISIBLE;
+                    } else {
+                        // Minimize — save position, hide window
+                        fw->restore_x = fw->x;
+                        fw->restore_y = fw->y;
+                        fw->flags |= WIN_FLAG_MINIMIZED;
+                        fw->flags &= ~WIN_FLAG_VISIBLE;
+                    }
+                    goto after_click;
+                }
                 if (hit_title(fw,mx,my)) {
-                    g_dragging=1; drag_idx=g_front;
-                    drag_ox=mx-fw->x; drag_oy=my-fw->y;
+                    // Don't allow dragging a maximized window
+                    if (!(fw->flags & WIN_FLAG_MAXIMIZED)) {
+                        g_dragging=1; drag_idx=g_front;
+                        drag_ox=mx-fw->x; drag_oy=my-fw->y;
+                    }
                     goto after_click;
                 }
                 goto after_click;

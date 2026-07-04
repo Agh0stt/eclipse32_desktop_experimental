@@ -184,7 +184,13 @@ $(KERNEL_BIN): $(KERNEL_OBJS) kernel/linker.ld
 	@echo "[LD  ] Kernel"
 	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $(BUILD)/kernel.elf $(KERNEL_OBJS)
 	$(OBJCOPY) -O binary $(BUILD)/kernel.elf $@
-	@echo "[INFO] Kernel size: $$(wc -c < $@) bytes"
+	@KERN_BYTES=$$(wc -c < $@); \
+	 KERN_SECTS=$$(( ($$KERN_BYTES + 511) / 512 )); \
+	 LAST_CHUNK=$$(( $$KERN_SECTS - 381 )); \
+	 echo "[INFO] Kernel size: $$KERN_BYTES bytes = $$KERN_SECTS sectors (last chunk: $$LAST_CHUNK)"; \
+	 sed -i "s/^%define KERNEL_SECTORS.*/%define KERNEL_SECTORS    $$KERN_SECTS/" boot/stage2/stage2.asm; \
+	 sed -i "/KERNEL_LBA_START + 381/{n; s/mov word  \[dap\.count\],  [0-9]*/mov word  [dap.count],  $$LAST_CHUNK/}" boot/stage2/stage2.asm; \
+	 echo "[INFO] stage2.asm patched: KERNEL_SECTORS=$$KERN_SECTS last_chunk=$$LAST_CHUNK"
 
 # =============================================================================
 # Built-in apps (baked into disk image at build time)

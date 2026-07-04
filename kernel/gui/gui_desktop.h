@@ -100,9 +100,11 @@ typedef enum {
 // ============================================================
 // Window flags
 // ============================================================
-#define WIN_FLAG_VISIBLE   (1<<0)
-#define WIN_FLAG_MOVEABLE  (1<<1)
-#define WIN_FLAG_CLOSEABLE (1<<2)
+#define WIN_FLAG_VISIBLE    (1<<0)
+#define WIN_FLAG_MOVEABLE   (1<<1)
+#define WIN_FLAG_CLOSEABLE  (1<<2)
+#define WIN_FLAG_MINIMIZED  (1<<3)
+#define WIN_FLAG_MAXIMIZED  (1<<4)
 #define MAX_WINDOWS        16
 
 // ============================================================
@@ -189,6 +191,7 @@ typedef struct {
 // ============================================================
 typedef struct {
     int32_t  x, y, w, h;
+    int32_t  restore_x, restore_y, restore_w, restore_h; /* saved for maximize/minimize */
     uint32_t flags;
     AppType  app;
     char     title[40];
