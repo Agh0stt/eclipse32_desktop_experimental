@@ -61,6 +61,11 @@ GUITEST_OBJ   := $(BUILD)/apps/guitest.o
 GUITEST_ELF   := $(BUILD)/apps/guitest.elf
 GUITEST_BIN   := $(BUILD)/apps/guitest.bin
 GUITEST_E32   := $(BUILD)/apps/GUITEST.E32
+NEWFEATURES_SRC := $(APPS_DIR)/newfeatures/newfeatures.c
+NEWFEATURES_OBJ := $(BUILD)/apps/newfeatures.o
+NEWFEATURES_ELF := $(BUILD)/apps/newfeatures.elf
+NEWFEATURES_BIN := $(BUILD)/apps/newfeatures.bin
+NEWFEATURES_E32 := $(BUILD)/apps/NEWFEATURES.E32
 WRITER_INS    := $(BUILD)/WRITER.INS
 LIBC_STRING_OBJ := $(BUILD)/apps/sdk/libc/string.o
 LIBC_UNISTD_OBJ := $(BUILD)/apps/sdk/libc/unistd.o
@@ -275,6 +280,19 @@ $(GUITEST_BIN): $(GUITEST_ELF) | $(BUILD)
 $(GUITEST_E32): $(GUITEST_BIN) tools/pack_e32.py | $(BUILD)
 	python3 tools/pack_e32.py $(GUITEST_BIN) $@
 
+$(NEWFEATURES_OBJ): $(NEWFEATURES_SRC) $(APPS_DIR)/sdk/e32_gui.h $(APPS_DIR)/sdk/e32_syscall.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(APP_CFLAGS) -I$(APPS_DIR)/sdk -I$(APPS_DIR)/sdk/libc -c $< -o $@
+
+$(NEWFEATURES_ELF): $(CRT0_OBJ) $(NEWFEATURES_OBJ) $(LIBC_OBJS) $(APPS_DIR)/sdk/app.ld | $(BUILD)
+	$(LD) -m elf_i386 -nostdlib -T $(APPS_DIR)/sdk/app.ld -o $@ $(CRT0_OBJ) $(NEWFEATURES_OBJ) $(LIBC_OBJS)
+
+$(NEWFEATURES_BIN): $(NEWFEATURES_ELF) | $(BUILD)
+	$(OBJCOPY) -O binary $(NEWFEATURES_ELF) $@
+
+$(NEWFEATURES_E32): $(NEWFEATURES_BIN) tools/pack_e32.py | $(BUILD)
+	python3 tools/pack_e32.py $(NEWFEATURES_BIN) $@
+
 $(WRITER_INS): $(WRITER_E32) tools/writer_pkg/install.cfg tools/pack_ins.py | $(BUILD)
 	@mkdir -p $(BUILD)/writer_pkg_staging
 	cp tools/writer_pkg/install.cfg $(BUILD)/writer_pkg_staging/install.cfg
@@ -284,7 +302,7 @@ $(WRITER_INS): $(WRITER_E32) tools/writer_pkg/install.cfg tools/pack_ins.py | $(
 # =============================================================================
 # Disk image assembly
 # =============================================================================
-$(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP_E32) $(HELLOC_E32) $(NUMECHO_E32) $(WRITER_E32) $(WRITER_INS) $(GUITEST_E32) | $(BUILD)
+$(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP_E32) $(HELLOC_E32) $(NUMECHO_E32) $(WRITER_E32) $(WRITER_INS) $(GUITEST_E32) $(NEWFEATURES_E32) | $(BUILD)
 	@echo "[IMG ] Creating disk image"
 	dd if=/dev/zero      of=$@ bs=512 count=131072 status=none
 	dd if=$(STAGE1_BIN)  of=$@ bs=512 seek=0  conv=notrunc status=none
@@ -298,6 +316,7 @@ $(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP
 	python3 tools/inject_fat32_file.py $@ $(NUMECHO_E32) NUMECHO.E32
 	python3 tools/inject_fat32_file.py $@ $(WRITER_E32) WRITER.E32
 	python3 tools/inject_fat32_file.py $@ $(GUITEST_E32) GUITEST.E32
+	python3 tools/inject_fat32_file.py $@ $(NEWFEATURES_E32) NEWFEATURES.E32
 	python3 tools/inject_ins.py $@ $(WRITER_INS) WRITER.INS
 	@echo "[IMG ] Done: $@"
 

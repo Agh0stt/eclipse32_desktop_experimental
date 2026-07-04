@@ -2674,8 +2674,14 @@ static void render_terminal(Window *w, int32_t mx, int32_t my, uint8_t click, ui
     if(!active) return;
 
     if(w->st.term_app_running){
-        char kc=kb_getchar_nowait();
-        if(kc) term_inbuf_push(w, kc);
+        // For SDK GUI apps (g_sdk_app_active), keyboard input is pushed into
+        // term_inbuf BEFORE the sched_yield() in the g_sdk_app_active branch
+        // above, so the app sees it on the same frame it polls. Don't push
+        // again here or keys will be doubled.
+        if (!g_sdk_app_active) {
+            char kc=kb_getchar_nowait();
+            if(kc) term_inbuf_push(w, kc);
+        }
         return;
     }
 
@@ -3874,6 +3880,16 @@ void gui_pump(void) {
         //     old coords to the new coords within g_bb, so content tracks the
         //     chrome exactly with no white flash.
         if (g_sdk_app_active) {
+            // Read keyboard input NOW, before yielding to the app, so that
+            // gui_poll_event() inside the app sees the key on this same frame.
+            // render_terminal's keyboard section runs AFTER the yield, which
+            // is too late — the app has already called gui_poll_event() and
+            // got back an empty key. We push into term_inbuf here so it's
+            // ready when the app drains it via gui_desktop_sdk_poll_key().
+            if (g_term_win) {
+                char _sdk_key = kb_getchar_nowait();
+                if (_sdk_key) term_inbuf_push(g_term_win, _sdk_key);
+            }
             // Update prev_btn BEFORE yielding so the next frame computes
             // click/release correctly even when we exit mid-frame here.
             prev_btn  = btn;
@@ -4061,4 +4077,16 @@ void gui_desktop_sdk_getrect(int32_t win_id,
     *oy = win_ca_y(w);
     *ow = win_ca_w(w);
     *oh = win_ca_h(w);
+}
+
+// Drain one character from the terminal input ring buffer for the currently
+// running SDK app.  Called by sys_gui_poll_event so GUI apps can read keys.
+// Returns 0 if no key is available.
+char gui_desktop_sdk_poll_key(void) {
+    if (!g_term_win) return 0;
+    Window *w = g_term_win;
+    if (w->st.term_in_head == w->st.term_in_tail) return 0;
+    char c = w->st.term_inbuf[w->st.term_in_tail];
+    w->st.term_in_tail = (w->st.term_in_tail + 1) % (uint32_t)sizeof(w->st.term_inbuf);
+    return c;
 }

@@ -40,11 +40,13 @@ extern int         gui_button(int32_t x, int32_t y, int32_t w, int32_t h,
 extern void        gui_pump(void);
 
 // gui_desktop_sdk_open_window / gui_desktop_sdk_close_window / gui_desktop_sdk_getrect
+// gui_desktop_sdk_poll_key: drain one char from the terminal input ring buffer.
 // are thin wrappers we add to gui_desktop.c (see patch below).
 extern int32_t     gui_desktop_sdk_open(const char *title, int32_t x, int32_t y,
                                         uint32_t w, uint32_t h);
 extern void        gui_desktop_sdk_close(int32_t win_idx);
 extern void        gui_desktop_sdk_set_title(int32_t win_idx, const char *title);
+extern char        gui_desktop_sdk_poll_key(void);
 extern void        gui_desktop_sdk_getrect(int32_t win_idx, int32_t *ox, int32_t *oy,
                                            int32_t *ow, int32_t *oh);
 
@@ -211,6 +213,17 @@ static int32_t sys_gui_poll_event(uint32_t a0, uint32_t a1, uint32_t a2,
     (void)a1; (void)a2; (void)a3; (void)a4;
     gui_event_t *ev = (gui_event_t *)syscall_translate_app_ptr(a0, sizeof(gui_event_t));
     if (!ptr_ok(ev)) return GUI_EVENT_NONE;
+
+    // Check for a pending key first — key events take priority over mouse.
+    char k = gui_desktop_sdk_poll_key();
+    if (k) {
+        ev->type      = GUI_EVENT_KEYDOWN;
+        ev->mouse_x   = g_mouse.x;
+        ev->mouse_y   = g_mouse.y;
+        ev->mouse_btn = g_mouse.buttons;
+        ev->key_ascii = (uint8_t)k;
+        return (int32_t)GUI_EVENT_KEYDOWN;
+    }
 
     ev->type      = GUI_EVENT_MOUSE;
     ev->mouse_x   = g_mouse.x;
