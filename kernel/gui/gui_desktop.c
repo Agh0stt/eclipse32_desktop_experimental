@@ -714,6 +714,27 @@ static uint8_t     g_sdk_app_active = 0;
 uint8_t gui_sdk_is_active(void) { return g_sdk_app_active; }
 // Set to 1 while the user is dragging a window title bar.
 static uint8_t     g_dragging = 0;
+// Resize state
+#define RESIZE_NONE  0
+#define RESIZE_N     1
+#define RESIZE_S     2
+#define RESIZE_E     3
+#define RESIZE_W     4
+#define RESIZE_NE    5
+#define RESIZE_NW    6
+#define RESIZE_SE    7
+#define RESIZE_SW    8
+static uint8_t     g_resizing   = RESIZE_NONE;
+static int32_t     resize_idx   = -1;
+static int32_t     resize_ox    = 0; // window x at resize start
+static int32_t     resize_oy    = 0; // window y at resize start
+static int32_t     resize_ow    = 0; // window w at resize start
+static int32_t     resize_oh    = 0; // window h at resize start
+static int32_t     resize_mx0   = 0; // mouse x at resize start
+static int32_t     resize_my0   = 0; // mouse y at resize start
+#define RESIZE_GRIP  5  // px from edge that counts as resize zone
+#define WIN_MIN_W   120
+#define WIN_MIN_H    80
 // Snapshot of each SDK window's content-area origin taken BEFORE the
 // drag-position update each frame.  After sched_yield() the app will
 // have drawn at these (old) coords; we blit those pixels to the new
@@ -827,6 +848,28 @@ static inline uint8_t hit_minimize(Window *w, int32_t px, int32_t py) {
     return pt_in(px, py,
         w->x+w->w-BORDER_W-3*TITLE_BAR_H-2, w->y+BORDER_W,
         TITLE_BAR_H, TITLE_BAR_H);
+}
+
+// Returns which resize edge/corner the cursor is on, or RESIZE_NONE.
+// Must be checked BEFORE hit_win so the grip zone takes priority.
+static uint8_t hit_resize_edge(Window *w, int32_t px, int32_t py) {
+    if (w->flags & WIN_FLAG_MAXIMIZED) return RESIZE_NONE;
+    int32_t x=w->x, y=w->y, ww=w->w, wh=w->h;
+    if (!pt_in(px, py, x-RESIZE_GRIP, y-RESIZE_GRIP,
+               ww+2*RESIZE_GRIP, wh+2*RESIZE_GRIP)) return RESIZE_NONE;
+    uint8_t on_l = (px >= x            && px < x+RESIZE_GRIP);
+    uint8_t on_r = (px >= x+ww-RESIZE_GRIP && px < x+ww);
+    uint8_t on_t = (py >= y            && py < y+RESIZE_GRIP);
+    uint8_t on_b = (py >= y+wh-RESIZE_GRIP && py < y+wh);
+    if (on_t && on_l) return RESIZE_NW;
+    if (on_t && on_r) return RESIZE_NE;
+    if (on_b && on_l) return RESIZE_SW;
+    if (on_b && on_r) return RESIZE_SE;
+    if (on_l) return RESIZE_W;
+    if (on_r) return RESIZE_E;
+    if (on_t) return RESIZE_N;
+    if (on_b) return RESIZE_S;
+    return RESIZE_NONE;
 }
 
 static void bring_front(int32_t idx) {
@@ -3794,7 +3837,29 @@ void gui_pump(void) {
             if(dw->x+dw->w>SCREEN_W)   dw->x=SCREEN_W-dw->w;
             if(dw->y+dw->h>SCREEN_H) dw->y=SCREEN_H-dw->h;
         }
-        if (release) { g_dragging=0; drag_idx=-1; }
+        // ---- Resize update ----
+        if (g_resizing != RESIZE_NONE && btn && resize_idx >= 0 && resize_idx < g_nwins) {
+            Window *rw = &g_wins[resize_idx];
+            int32_t dx = mx - resize_mx0;
+            int32_t dy = my - resize_my0;
+            int32_t nx = resize_ox, ny = resize_oy;
+            int32_t nw = resize_ow, nh = resize_oh;
+            // Apply delta based on which edge/corner
+            if (g_resizing==RESIZE_E  || g_resizing==RESIZE_NE || g_resizing==RESIZE_SE) nw = resize_ow + dx;
+            if (g_resizing==RESIZE_W  || g_resizing==RESIZE_NW || g_resizing==RESIZE_SW) { nx = resize_ox + dx; nw = resize_ow - dx; }
+            if (g_resizing==RESIZE_S  || g_resizing==RESIZE_SE || g_resizing==RESIZE_SW) nh = resize_oh + dy;
+            if (g_resizing==RESIZE_N  || g_resizing==RESIZE_NE || g_resizing==RESIZE_NW) { ny = resize_oy + dy; nh = resize_oh - dy; }
+            // Clamp minimum size
+            if (nw < WIN_MIN_W) { if (g_resizing==RESIZE_W||g_resizing==RESIZE_NW||g_resizing==RESIZE_SW) nx = resize_ox+resize_ow-WIN_MIN_W; nw = WIN_MIN_W; }
+            if (nh < WIN_MIN_H) { if (g_resizing==RESIZE_N||g_resizing==RESIZE_NW||g_resizing==RESIZE_NE) ny = resize_oy+resize_oh-WIN_MIN_H; nh = WIN_MIN_H; }
+            // Clamp to screen
+            if (nx < 0) { nw += nx; nx = 0; }
+            if (ny < DESKTOP_TOP_FOR(g_theme)) { nh += ny - DESKTOP_TOP_FOR(g_theme); ny = DESKTOP_TOP_FOR(g_theme); }
+            if (nx+nw > SCREEN_W) nw = SCREEN_W-nx;
+            if (ny+nh > SCREEN_H) nh = SCREEN_H-ny;
+            rw->x = nx; rw->y = ny; rw->w = nw; rw->h = nh;
+        }
+        if (release) { g_dragging=0; drag_idx=-1; g_resizing=RESIZE_NONE; resize_idx=-1; }
 
         // ---- Click handling ----
         if (click) {
@@ -3814,6 +3879,27 @@ void gui_pump(void) {
             }
 
             // Taskbar handled inside draw_taskbar above (we pass click through)
+
+            // Check resize edges BEFORE normal window hit-test
+            if (g_resizing == RESIZE_NONE && !g_dragging) {
+                for (int32_t i = g_nwins-1; i >= 0; i--) {
+                    Window *w = &g_wins[i];
+                    if (!(w->flags & WIN_FLAG_VISIBLE)) continue;
+                    uint8_t edge = hit_resize_edge(w, mx, my);
+                    if (edge != RESIZE_NONE) {
+                        bring_front(i);
+                        g_resizing  = edge;
+                        resize_idx  = g_front;
+                        resize_ox   = g_wins[g_front].x;
+                        resize_oy   = g_wins[g_front].y;
+                        resize_ow   = g_wins[g_front].w;
+                        resize_oh   = g_wins[g_front].h;
+                        resize_mx0  = mx;
+                        resize_my0  = my;
+                        goto after_click;
+                    }
+                }
+            }
 
             // App windows (front to back)
             for (int32_t i = g_nwins-1; i >= 0; i--) {
