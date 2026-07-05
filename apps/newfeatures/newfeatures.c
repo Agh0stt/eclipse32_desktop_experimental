@@ -31,39 +31,35 @@ static const char *pulse_str(uint32_t ticks) {
 }
 
 void main(void) {
-    int win = gui_win_create("New GUI Features Demo", -1, -1, 480, 380);
+    int win = gui_win_create("New GUI Features Demo", -1, -1, 480, 420);
     if (win < 0) e32_exit(1);
 
-    gui_input_t name_field = { {0}, 1, 0, 24 };  // focused=1 initially
-    gui_input_t pass_field = { {0}, 0, 1, 16 };  // masked
+    gui_input_t name_field = { {0}, 1, 0, 24 };
+    gui_input_t pass_field = { {0}, 0, 1, 16 };
 
-    uint8_t dark_mode  = 0;
-    uint8_t sound_on   = 1;
-    int32_t volume     = 60;
-    int32_t brightness = 80;
-    uint8_t running    = 1;
+    uint8_t dark_mode   = 0;
+    uint8_t sound_on    = 1;
+    int32_t volume      = 60;
+    int32_t brightness  = 80;
+    uint8_t running     = 1;
     int     last_msgbox = -1;
+    static char picked[64] = {0};
 
     uint8_t prev_btn = 0;
 
     while (running) {
-        // ---- Single poll_event per frame — gives us BOTH key and mouse ----
         gui_event_t ev;
         int ev_type = gui_poll_event(&ev);
 
-        // Extract mouse state from every event (it's always populated)
         int32_t mx  = ev.mouse_x;
         int32_t my  = ev.mouse_y;
         uint8_t btn = (uint8_t)ev.mouse_btn;
 
-        // Rising-edge click
         uint8_t lclick = (uint8_t)(btn & 1) & (uint8_t)(~prev_btn & 1);
         prev_btn = btn;
 
-        // Key: only valid on KEYDOWN events
         char key = (ev_type == GUI_EVENT_KEYDOWN) ? (char)ev.key_ascii : 0;
 
-        // Tab cycles focus
         if (key == '\t') {
             if (name_field.focused) { name_field.focused=0; pass_field.focused=1; }
             else                    { pass_field.focused=0; name_field.focused=1; }
@@ -72,16 +68,14 @@ void main(void) {
 
         uint32_t ticks = gui_get_ticks();
 
-        // ---- Layout -------------------------------------------------------
         gui_rect_t ca;
         gui_win_getrect(win, &ca);
 
-        uint32_t bg  = dark_mode ? RGB(30,30,40)    : RGB(236,233,216);
-        uint32_t lbl = dark_mode ? COL_LTGREY       : COL_BLACK;
-        uint32_t sec = dark_mode ? RGB(60,80,120)   : RGB(180,200,230);
+        uint32_t bg  = dark_mode ? RGB(30,30,40)  : RGB(236,233,216);
+        uint32_t lbl = dark_mode ? COL_LTGREY     : COL_BLACK;
+        uint32_t sec = dark_mode ? RGB(60,80,120) : RGB(180,200,230);
         gui_fill_rect(ca.x, ca.y, ca.w, ca.h, bg);
 
-        // Banner
         uint32_t ban = dark_mode ? RGB(20,40,80) : RGB(20,60,140);
         gui_fill_rect(ca.x, ca.y, ca.w, 28, ban);
         gui_puts(ca.x+10, ca.y+8, "Eclipse32  Extended GUI Widget Demo", COL_WHITE, ban);
@@ -96,21 +90,17 @@ void main(void) {
         gui_puts(ca.x+8, y+4,  "Name:",     lbl, bg);
         gui_puts(ca.x+8, y+22, "Password:", lbl, bg);
 
-        // Pass key only to the focused field; pass 0 to the other.
-        // lclick lets the kernel hit-test manage focus switching on click.
         gui_input_draw(ca.x+72, y,    240, 16, &name_field,
                        mx, my, lclick, name_field.focused ? key : 0);
         gui_input_draw(ca.x+72, y+18, 240, 16, &pass_field,
                        mx, my, lclick, pass_field.focused ? key : 0);
 
-        // Live readouts
         char lenbuf[8]; uitoa((uint32_t)kstrlen(name_field.buf), lenbuf);
         gui_puts(ca.x+320, y+4,  "len:", lbl, bg);
         gui_puts(ca.x+356, y+4,  lenbuf, lbl, bg);
         gui_puts(ca.x+320, y+22,
                  name_field.focused ? "focus:name" : "focus:pass",
                  RGB(80,160,255), bg);
-
         y += 44;
 
         // ---- Section 2: Checkboxes ----------------------------------------
@@ -139,7 +129,6 @@ void main(void) {
         uitoa((uint32_t)brightness, bbuf);
         gui_puts(ca.x+328, y,    vbuf, lbl, bg);
         gui_puts(ca.x+328, y+16, bbuf, lbl, bg);
-
         gui_fill_rect(ca.x+352, y,    volume*80/100,     8, RGB(40,160,255));
         gui_fill_rect(ca.x+352, y+10, brightness*80/100, 8, RGB(255,200,40));
         y += 34;
@@ -183,10 +172,21 @@ void main(void) {
                      last_msgbox ? RGB(40,200,40) : RGB(200,40,40), bg);
         y += 26;
 
+        // ---- Section 6: File Picker ---------------------------------------
+        gui_fill_rect(ca.x+4, y, ca.w-8, 13, sec);
+        gui_puts(ca.x+8, y+2, "File Picker  (gui_filepick)", COL_BLACK, sec);
+        y += 15;
+
+        if (gui_button(ca.x+8, y, 110, 18, "Pick File", mx, my, lclick))
+            gui_filepick(picked, sizeof(picked), NULL, "Open File");
+        if (picked[0])
+            gui_puts(ca.x+128, y+3, picked, RGB(255,180,0), bg);
+        y += 22;
+
         // ---- Ticks --------------------------------------------------------
         char tbuf[12]; uitoa(ticks, tbuf);
-        gui_puts(ca.x+8,   y, "Ticks:", lbl, bg);
-        gui_puts(ca.x+60,  y, tbuf, RGB(255,180,0), bg);
+        gui_puts(ca.x+8,  y, "Ticks:", lbl, bg);
+        gui_puts(ca.x+60, y, tbuf, RGB(255,180,0), bg);
 
         // ---- Close --------------------------------------------------------
         if (gui_button(ca.x+(ca.w-80)/2, ca.y+ca.h-22, 80, 18,

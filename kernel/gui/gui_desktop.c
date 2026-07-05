@@ -4254,6 +4254,12 @@ void gui_desktop_sdk_getrect(int32_t win_id,
     *oh = win_ca_h(w);
 }
 
+// Wrapper so gui_sdk.c can call fs_list without including gui_compat.h
+// (which would cause duplicate g_mouse / g_fb definitions).
+int gui_desktop_sdk_fs_list(char names[][EFS_FILENAME_MAX], int max) {
+    return fs_list(names, max);
+}
+
 // Drain one character from the terminal input ring buffer for the currently
 // running SDK app.  Called by sys_gui_poll_event so GUI apps can read keys.
 // Returns 0 if no key is available.

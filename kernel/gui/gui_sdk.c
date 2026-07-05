@@ -47,6 +47,7 @@ extern int32_t     gui_desktop_sdk_open(const char *title, int32_t x, int32_t y,
 extern void        gui_desktop_sdk_close(int32_t win_idx);
 extern void        gui_desktop_sdk_set_title(int32_t win_idx, const char *title);
 extern char        gui_desktop_sdk_poll_key(void);
+extern int         gui_desktop_sdk_fs_list(char names[][64], int max);
 extern void        gui_desktop_sdk_getrect(int32_t win_idx, int32_t *ox, int32_t *oy,
                                            int32_t *ow, int32_t *oh);
 
@@ -696,6 +697,166 @@ static int32_t sys_gui_msgbox(uint32_t a0, uint32_t a1, uint32_t a2,
 }
 
 // ---------------------------------------------------------------------------
+// SYS_GUI_FILEPICK  a0=ptr→gui_filepick_args_t
+// Blocking modal file picker.  Lists root directory, optional extension
+// filter (e.g. ".E32", NULL = show all).  Returns 1 if user picked a file
+// (name written to args->out_buf), 0 if cancelled.
+// ---------------------------------------------------------------------------
+#define FILEPICK_MAX_FILES  64
+#define FILEPICK_ROW_H      14
+#define FILEPICK_VISIBLE    14   // rows visible at once
+
+typedef struct {
+    char    *out_buf;
+    int32_t  buf_len;
+    char    *filter;     // e.g. ".E32" — NULL = all files
+    char    *title;      // dialog title — NULL = "Open File"
+} gui_filepick_args_t;
+
+static int32_t sys_gui_filepick(uint32_t a0, uint32_t a1, uint32_t a2,
+                                 uint32_t a3, uint32_t a4) {
+    (void)a1; (void)a2; (void)a3; (void)a4;
+    gui_filepick_args_t *a = (gui_filepick_args_t *)
+        syscall_translate_app_ptr(a0, sizeof(gui_filepick_args_t));
+    if (!ptr_ok(a)) return 0;
+
+    char    *out_buf = (char *)syscall_translate_app_ptr((uint32_t)a->out_buf, 1);
+    int32_t  buf_len = a->buf_len;
+    const char *filter = a->filter
+        ? (const char *)syscall_translate_app_ptr((uint32_t)a->filter, 1) : NULL;
+    const char *title  = a->title
+        ? (const char *)syscall_translate_app_ptr((uint32_t)a->title,  1) : "Open File";
+    if (!ptr_ok(out_buf) || buf_len <= 0) return 0;
+    if (!ptr_ok(title))  title  = "Open File";
+
+    // List root directory
+    static char names[FILEPICK_MAX_FILES][64];
+    int32_t total = gui_desktop_sdk_fs_list(names, FILEPICK_MAX_FILES);
+
+    // Filter by extension if requested
+    static char filtered[FILEPICK_MAX_FILES][64];
+    int32_t count = 0;
+    for (int32_t i = 0; i < total && count < FILEPICK_MAX_FILES; i++) {
+        if (filter && ptr_ok(filter)) {
+            // Check if name ends with filter string
+            int32_t nlen = (int32_t)kstrlen(names[i]);
+            int32_t flen = (int32_t)kstrlen(filter);
+            if (nlen < flen) continue;
+            // Case-insensitive suffix compare
+            int32_t match = 1;
+            for (int32_t j = 0; j < flen; j++) {
+                char nc = names[i][nlen-flen+j];
+                char fc = filter[j];
+                if (nc >= 'a' && nc <= 'z') nc -= 32;
+                if (fc >= 'a' && fc <= 'z') fc -= 32;
+                if (nc != fc) { match = 0; break; }
+            }
+            if (!match) continue;
+        }
+        kstrcpy(filtered[count], names[i]);
+        count++;
+    }
+
+    // Dialog dimensions
+    int32_t dlg_w = 300;
+    int32_t dlg_h = 20 + 6 + FILEPICK_VISIBLE * FILEPICK_ROW_H + 6 + 26 + 6;
+    int32_t dlg_x = (800 - dlg_w) / 2;
+    int32_t dlg_y = (600 - dlg_h) / 2;
+
+    int32_t sel      = -1;
+    int32_t scroll   = 0;
+    uint8_t prev_btn = 0;
+
+    while (1) {
+        gui_mouse_t m;
+        m.x = g_mouse.x; m.y = g_mouse.y; m.buttons = g_mouse.buttons;
+        uint8_t btn    = (m.buttons & 1) ? 1 : 0;
+        uint8_t click  = btn & ~prev_btn;
+        prev_btn = btn;
+
+        // Shadow + body
+        gui_fill_rect(dlg_x+4, dlg_y+4, dlg_w, dlg_h, RGB(100,100,100));
+        gui_fill_rect(dlg_x,   dlg_y,   dlg_w, dlg_h, RGB(236,233,216));
+        // Title bar
+        gui_fill_rect(dlg_x, dlg_y, dlg_w, 20, RGB(10,36,106));
+        gui_puts(dlg_x+6, dlg_y+3, title, COL_WHITE, RGB(10,36,106));
+        // Border
+        gui_draw_hline(dlg_x, dlg_y,         dlg_w, RGB(128,128,128));
+        gui_draw_hline(dlg_x, dlg_y+dlg_h-1, dlg_w, RGB(128,128,128));
+        gui_draw_vline(dlg_x,         dlg_y,  dlg_h, RGB(128,128,128));
+        gui_draw_vline(dlg_x+dlg_w-1, dlg_y,  dlg_h, RGB(128,128,128));
+
+        // File list area
+        int32_t list_x = dlg_x + 6;
+        int32_t list_y = dlg_y + 26;
+        int32_t list_w = dlg_w - 12;
+        int32_t list_h = FILEPICK_VISIBLE * FILEPICK_ROW_H;
+
+        // List background
+        gui_fill_rect(list_x, list_y, list_w, list_h, COL_WHITE);
+        gui_draw_hline(list_x, list_y,          list_w, RGB(128,128,128));
+        gui_draw_hline(list_x, list_y+list_h-1, list_w, RGB(128,128,128));
+        gui_draw_vline(list_x,          list_y,  list_h, RGB(128,128,128));
+        gui_draw_vline(list_x+list_w-1, list_y,  list_h, RGB(128,128,128));
+
+        if (count == 0) {
+            gui_puts(list_x+8, list_y+4, "No files found.", RGB(128,128,128), COL_WHITE);
+        }
+
+        for (int32_t i = 0; i < FILEPICK_VISIBLE; i++) {
+            int32_t fi = scroll + i;
+            if (fi >= count) break;
+            int32_t ry  = list_y + i * FILEPICK_ROW_H;
+            uint8_t sel_row = (fi == sel) ? 1 : 0;
+            uint32_t rbg = sel_row ? RGB(10,36,106) : COL_WHITE;
+            uint32_t rfg = sel_row ? COL_WHITE : COL_BLACK;
+            gui_fill_rect(list_x+1, ry, list_w-2, FILEPICK_ROW_H, rbg);
+            gui_puts(list_x+6, ry+2, filtered[fi], rfg, rbg);
+            // Click to select
+            if (click && m.x >= list_x && m.x < list_x+list_w &&
+                m.y >= ry && m.y < ry+FILEPICK_ROW_H) {
+                sel = fi;
+            }
+        }
+
+        // Scrollbar (simple up/down buttons)
+        int32_t sb_x = dlg_x + dlg_w - 18;
+        if (count > FILEPICK_VISIBLE) {
+            if (gui_button(sb_x, list_y,              16, 16, "^", m.x, m.y, click) && scroll > 0)
+                scroll--;
+            if (gui_button(sb_x, list_y+list_h-16,    16, 16, "v", m.x, m.y, click) && scroll < count-FILEPICK_VISIBLE)
+                scroll++;
+        }
+
+        // Selected filename display
+        int32_t fname_y = list_y + list_h + 4;
+        gui_fill_rect(list_x, fname_y, list_w-20, 14, COL_WHITE);
+        gui_draw_hline(list_x, fname_y,    list_w-20, RGB(128,128,128));
+        gui_draw_hline(list_x, fname_y+13, list_w-20, RGB(128,128,128));
+        gui_draw_vline(list_x,           fname_y, 14, RGB(128,128,128));
+        gui_draw_vline(list_x+list_w-21, fname_y, 14, RGB(128,128,128));
+        if (sel >= 0 && sel < count)
+            gui_puts(list_x+4, fname_y+2, filtered[sel], COL_BLACK, COL_WHITE);
+
+        // OK / Cancel buttons
+        int32_t btn_y = fname_y + 18;
+        int32_t ok_x  = dlg_x + dlg_w/2 - 74;
+        int32_t cx_x  = dlg_x + dlg_w/2 + 8;
+        if (gui_button(ok_x, btn_y, 64, 18, "Open", m.x, m.y, click) && sel >= 0) {
+            int32_t n = (int32_t)kstrlen(filtered[sel]);
+            if (n >= buf_len) n = buf_len - 1;
+            kmemcpy(out_buf, filtered[sel], (uint32_t)n);
+            out_buf[n] = 0;
+            return 1;
+        }
+        if (gui_button(cx_x, btn_y, 64, 18, "Cancel", m.x, m.y, click)) return 0;
+
+        sched_yield();
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Register new syscalls
 // ---------------------------------------------------------------------------
 void gui_sdk_register_extended_syscalls(void) {
@@ -707,4 +868,5 @@ void gui_sdk_register_extended_syscalls(void) {
     syscall_register(SYS_GUI_FILL_CIRCLE, sys_gui_fill_circle);
     syscall_register(SYS_GUI_DRAW_CIRCLE, sys_gui_draw_circle);
     syscall_register(SYS_GUI_DRAW_IMAGE,  sys_gui_draw_image);
+    syscall_register(SYS_GUI_FILEPICK,    sys_gui_filepick);
 }

@@ -84,6 +84,7 @@ void gui_sdk_register_syscalls(void); // plug into syscall_table[]
 #define SYS_GUI_FILL_CIRCLE  41
 #define SYS_GUI_DRAW_CIRCLE  42
 #define SYS_GUI_DRAW_IMAGE   43
+#define SYS_GUI_FILEPICK     44
 
 #define GUI_INPUT_MAXLEN  127
 

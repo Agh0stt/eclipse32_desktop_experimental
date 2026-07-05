@@ -119,6 +119,7 @@ static inline void gui_clear(const gui_rect_t *ca,uint32_t col) {
 #define SYS_GUI_FILL_CIRCLE  41   // filled circle
 #define SYS_GUI_DRAW_CIRCLE  42   // circle outline
 #define SYS_GUI_DRAW_IMAGE   43   // blit raw pixel buffer
+#define SYS_GUI_FILEPICK     44   // blocking file picker dialog
 
 // ---------------------------------------------------------------------------
 // gui_input_t  — text input field widget state
@@ -247,4 +248,35 @@ static inline char gui_get_last_key(void) {
     gui_event_t ev;
     if (gui_poll_event(&ev) == GUI_EVENT_KEYDOWN) return (char)ev.key_ascii;
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// gui_filepick — blocking file picker modal dialog
+//
+//   filter : extension to show, e.g. ".E32" or ".TXT" (NULL = all files)
+//   title  : dialog title (NULL = "Open File")
+//   out_buf: buffer to receive selected filename
+//   buf_len: size of out_buf
+//   Returns 1 if user picked a file, 0 if cancelled.
+//
+// Example:
+//   char path[64];
+//   if (gui_filepick(path, sizeof(path), ".E32", "Pick an App"))
+//       // path now contains "MYPROG.E32"
+// ---------------------------------------------------------------------------
+typedef struct {
+    char    *out_buf;
+    int32_t  buf_len;
+    char    *filter;
+    char    *title;
+} gui_filepick_args_t;
+
+static inline int32_t gui_filepick(char *out_buf, int32_t buf_len,
+                                    const char *filter, const char *title) {
+    gui_filepick_args_t a;
+    a.out_buf = out_buf;
+    a.buf_len = buf_len;
+    a.filter  = (char *)filter;
+    a.title   = (char *)title;
+    return e32_syscall5(SYS_GUI_FILEPICK, (int)&a, 0, 0, 0, 0);
 }
