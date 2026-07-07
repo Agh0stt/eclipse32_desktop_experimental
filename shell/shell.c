@@ -1740,6 +1740,32 @@ static int execute_cmd(cmd_t *cmd){
         last_exit_code = rc;
         return rc;
     }
+    /* /bin lookup: bare name (no extension) → /bin/<NAME>.E32 */
+    if(!dot) {
+        char bin_path[SHELL_MAX_PATH];
+        char uname[64];
+        int ui = 0;
+        while(name[ui] && ui < 63) {
+            char c = name[ui];
+            if(c >= 'a' && c <= 'z') c -= 32;
+            uname[ui++] = c;
+        }
+        uname[ui] = 0;
+        kstrncpy(bin_path, "/bin/", SHELL_MAX_PATH - 1);
+        kstrcat(bin_path, uname);
+        kstrcat(bin_path, ".E32");
+        fat32_stat_t bst;
+        if(fat32_stat(bin_path, &bst) == 0 && !bst.is_dir) {
+            int rc = e32_exec_file_argv(bin_path, cmd->argc, cmd->args);
+            if(rc < 0) {
+                term_set_color(TC_RED); tprintf("esh: failed to execute: %s (err=%d)\n", name, rc); term_reset();
+                last_exit_code = 126;
+                return 126;
+            }
+            last_exit_code = rc;
+            return rc;
+        }
+    }
     term_set_color(TC_RED);tprintf("esh: command not found: %s\n",name);term_reset();
     last_exit_code=127; return 127;
 }

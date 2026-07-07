@@ -355,6 +355,13 @@ inject/%:
 	python3 tools/inject_fat32_file.py $(DISK_IMG) $(BUILD)/apps/$*.E32 $*.E32
 	@echo "[DONE] $*.E32 in FAT32 root"
 
+# 2b. Inject .E32 into /bin (shell commands)
+# Usage: make injectsh/hi
+injectsh/%:
+	@echo "[INJECTSH] $*.E32 → /bin"
+	python3 tools/injectsh.py $(DISK_IMG) $(BUILD)/apps/$*.E32 $*
+	@echo "[DONE] $*.E32 in /bin"
+
 # 3. Inject any arbitrary file into disk root
 # Usage: make inject-file/path/to/file.txt
 inject-file/%:
