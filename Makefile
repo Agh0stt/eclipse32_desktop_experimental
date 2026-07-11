@@ -70,6 +70,10 @@ HI_OBJ        := $(BUILD)/apps/hi.o
 HI_ELF        := $(BUILD)/apps/hi.elf
 HI_BIN        := $(BUILD)/apps/hi.bin
 HI_E32        := $(BUILD)/apps/HI.E32
+MEOW_OBJ      := $(BUILD)/apps/meow.o
+MEOW_ELF      := $(BUILD)/apps/meow.elf
+MEOW_BIN      := $(BUILD)/apps/meow.bin
+MEOW_E32      := $(BUILD)/apps/MEOW.E32
 WRITER_INS    := $(BUILD)/WRITER.INS
 LIBC_STRING_OBJ := $(BUILD)/apps/sdk/libc/string.o
 LIBC_UNISTD_OBJ := $(BUILD)/apps/sdk/libc/unistd.o
@@ -316,6 +320,20 @@ $(HI_BIN): $(HI_ELF) | $(BUILD)
 
 $(HI_E32): $(HI_BIN) tools/pack_e32.py | $(BUILD)
 	python3 tools/pack_e32.py $(HI_BIN) $@
+
+$(MEOW_OBJ): $(APPS_DIR)/meow/meow.c $(APPS_DIR)/sdk/e32_syscall.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(APP_CFLAGS) -c -o $@ $<
+
+$(MEOW_ELF): $(CRT0_OBJ) $(MEOW_OBJ) $(LIBC_OBJS) $(APPS_DIR)/sdk/app.ld | $(BUILD)
+	$(LD) -m elf_i386 -nostdlib -T $(APPS_DIR)/sdk/app.ld -o $@ $(CRT0_OBJ) $(MEOW_OBJ) $(LIBC_OBJS)
+
+$(MEOW_BIN): $(MEOW_ELF) | $(BUILD)
+	$(OBJCOPY) -O binary $(MEOW_ELF) $@
+
+$(MEOW_E32): $(MEOW_BIN) tools/pack_e32.py | $(BUILD)
+	python3 tools/pack_e32.py $(MEOW_BIN) $@
+
 $(WRITER_INS): $(WRITER_E32) tools/writer_pkg/install.cfg tools/pack_ins.py | $(BUILD)
 	@mkdir -p $(BUILD)/writer_pkg_staging
 	cp tools/writer_pkg/install.cfg $(BUILD)/writer_pkg_staging/install.cfg
@@ -325,7 +343,7 @@ $(WRITER_INS): $(WRITER_E32) tools/writer_pkg/install.cfg tools/pack_ins.py | $(
 # =============================================================================
 # Disk image assembly
 # =============================================================================
-$(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP_E32) $(HELLOC_E32) $(NUMECHO_E32) $(WRITER_E32) $(WRITER_INS) $(GUITEST_E32) $(NEWFEATURES_E32) $(HI_E32) | $(BUILD)
+$(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP_E32) $(HELLOC_E32) $(NUMECHO_E32) $(WRITER_E32) $(WRITER_INS) $(GUITEST_E32) $(NEWFEATURES_E32) $(HI_E32) $(MEOW_E32) | $(BUILD)
 	@echo "[IMG ] Creating disk image"
 	dd if=/dev/zero      of=$@ bs=512 count=131072 status=none
 	dd if=$(STAGE1_BIN)  of=$@ bs=512 seek=0  conv=notrunc status=none
@@ -342,6 +360,7 @@ $(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP
 	python3 tools/inject_fat32_file.py $@ $(NEWFEATURES_E32) NEWFEATURES.E32
 	python3 tools/inject_ins.py $@ $(WRITER_INS) WRITER.INS
 	python3 tools/injectsh.py $@ $(HI_E32) hi
+	python3 tools/injectsh.py $@ $(MEOW_E32) meow
 	@echo "[IMG ] Done: $@"
 
 $(BUILD):

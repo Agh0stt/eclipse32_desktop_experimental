@@ -1740,9 +1740,9 @@ static int execute_cmd(cmd_t *cmd){
         last_exit_code = rc;
         return rc;
     }
-    /* /bin lookup: bare name (no extension) → /bin/<NAME>.E32 */
+    /* Bare name (no extension) → try /bin/<NAME>.E32 only.
+       (Current-directory files must be run with the explicit .E32 extension.) */
     if(!dot) {
-        char bin_path[SHELL_MAX_PATH];
         char uname[64];
         int ui = 0;
         while(name[ui] && ui < 63) {
@@ -1751,9 +1751,15 @@ static int execute_cmd(cmd_t *cmd){
             uname[ui++] = c;
         }
         uname[ui] = 0;
+
+        char uname_e32[70];
+        kstrncpy(uname_e32, uname, 63);
+        kstrcat(uname_e32, ".E32");
+
+        /* fall back to /bin */
+        char bin_path[SHELL_MAX_PATH];
         kstrncpy(bin_path, "/bin/", SHELL_MAX_PATH - 1);
-        kstrcat(bin_path, uname);
-        kstrcat(bin_path, ".E32");
+        kstrcat(bin_path, uname_e32);
         fat32_stat_t bst;
         if(fat32_stat(bin_path, &bst) == 0 && !bst.is_dir) {
             int rc = e32_exec_file_argv(bin_path, cmd->argc, cmd->args);

@@ -473,8 +473,17 @@ int fat32_open(const char *path, int flags) {
     }
 
     // Allocate fd
+    // NOTE: fds 0/1/2 are reserved for stdin/stdout/stderr by the syscall
+    // layer (sys_read_impl/sys_write_impl special-case those numbers
+    // unconditionally). If a real file were handed fd 0, every read()
+    // on it would silently be redirected to keyboard/GUI input instead
+    // of the file — which is exactly what happened here: the first file
+    // any app opened landed on fd 0, so its read() calls read stdin
+    // (returning stray/echoed bytes one at a time) instead of the file's
+    // actual contents. Start allocation at 3 to keep file fds out of the
+    // reserved range.
     int fd = -1;
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+    for (int i = 3; i < MAX_OPEN_FILES; i++) {
         if (!file_table[i].used) { fd = i; break; }
     }
     if (fd < 0) return -1;
