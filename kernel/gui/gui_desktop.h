@@ -181,9 +181,6 @@ typedef struct {
     // terminal shell state (real shell)
     int32_t  term_initialized;
     uint8_t  term_app_running;          // 1 if a sub-app is running
-    int32_t  term_app_slot;             // scheduler task id running this
-                                         // window's app (TASK_NONE/0 when
-                                         // idle -- see sched_alloc_app_slot())
     uint8_t  term_in_head;              // circular input buffer write index
     uint8_t  term_in_tail;             // circular input buffer read index
     char     term_inbuf[256];           // keyboard input ring buffer

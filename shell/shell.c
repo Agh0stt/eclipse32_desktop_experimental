@@ -1977,12 +1977,9 @@ void shell_main(void){
 // ---- GUI Terminal hook -----------------------------------------------
 // Output sink used when running a command from the GUI terminal
 void shell_exec_line(const char *line, void (*cb)(const char *, void *), void *ud) {
-    int slot = sched_current(); // our own slot -- shell_exec_line always runs
-                                 // inside the app task the scheduler already
-                                 // switched into (see term_app_runner)
     g_term_cb = cb;
     g_term_ud = ud;
-    syscall_set_output_cb(slot, cb, ud);   // E32 stdout → same terminal window
+    syscall_set_output_cb(cb, ud);   // E32 stdout → same terminal window
 
     char buf[256];
     kstrncpy(buf, line, 255); buf[255] = 0;
@@ -1993,5 +1990,5 @@ void shell_exec_line(const char *line, void (*cb)(const char *, void *), void *u
 
     g_term_cb = 0;
     g_term_ud = 0;
-    syscall_set_output_cb(slot, NULL, NULL);
+    syscall_set_output_cb(NULL, NULL);
 }
