@@ -12,25 +12,41 @@
 #define SYSCALL_TABLE_SIZE 128
 #define READDIR_SCRATCH_MAX 64
 
-static volatile bool g_app_exit_requested = false;
-static volatile int g_app_exit_code = 0;
-static const uint8_t *g_app_image_base = NULL;
-static uint32_t g_app_image_size = 0;
-static uint32_t g_brk_base = 0;
-static uint32_t g_brk_current = 0;
-static uint32_t g_brk_limit = 0;
+/* -----------------------------------------------------------------------
+   Per-app-task state.
+   -----------------------------------------------------------------------
+   These used to be single global variables, which was fine when exactly
+   one app could ever be executing system-wide (the old TASK_GUI/TASK_APP
+   scheduler). Now that up to SCHED_MAX_APPS terminal windows can each have
+   their own program running concurrently -- and any of them can be
+   *suspended mid-syscall* (e.g. blocked in sys_read, or yielded inside
+   tcp_send/tcp_recv) while another one runs -- each running task needs its
+   own independent copy of this state, or one app's stdout would end up
+   interleaved into another window, one app's exit code would leak into
+   another's, etc. Arrays are indexed by scheduler task id (sched_current()),
+   so slot 0 (TASK_GUI) is simply unused padding. */
+static volatile bool g_app_exit_requested[SCHED_TASKS];
+static volatile int g_app_exit_code[SCHED_TASKS];
+static const uint8_t *g_app_image_base[SCHED_TASKS];
+static uint32_t g_app_image_size[SCHED_TASKS];
+static uint32_t g_brk_base[SCHED_TASKS];
+static uint32_t g_brk_current[SCHED_TASKS];
+static uint32_t g_brk_limit[SCHED_TASKS];
 static fat32_dir_entry_t readdir_scratch[READDIR_SCRATCH_MAX];
 
 /* Output redirect: when an E32 runs inside the GUI terminal, stdout/stderr
-   route through this callback instead of going directly to vga_putchar. */
-static void (*g_out_cb)(const char *, void *) = NULL;
-static void *g_out_ud = NULL;
+   route through this callback instead of going directly to vga_putchar.
+   Indexed by task slot so each terminal window's app writes to its own
+   window even while other windows' apps are also running. */
+static void (*g_out_cb[SCHED_TASKS])(const char *, void *);
+static void *g_out_ud[SCHED_TASKS];
 
 /* Input redirect: when an E32 runs inside the GUI terminal, stdin reads
    use this non-blocking callback instead of keyboard_wait_event().
-   Returns 0 if no char is available yet (caller should yield). */
-static int (*g_in_cb)(void *) = NULL;
-static void *g_in_ud = NULL;
+   Returns 0 if no char is available yet (caller should yield). Indexed by
+   task slot, same reasoning as g_out_cb above. */
+static int (*g_in_cb[SCHED_TASKS])(void *);
+static void *g_in_ud[SCHED_TASKS];
 
 static bool ptr_ok(const void *ptr) {
     uint32_t p = (uint32_t)ptr;
@@ -38,8 +54,9 @@ static bool ptr_ok(const void *ptr) {
 }
 
 static void *translate_app_ptr(uint32_t raw_ptr, uint32_t len) {
-    if (g_app_image_base && raw_ptr < g_app_image_size && len <= (g_app_image_size - raw_ptr)) {
-        return (void *)(g_app_image_base + raw_ptr);
+    int t = sched_current();
+    if (g_app_image_base[t] && raw_ptr < g_app_image_size[t] && len <= (g_app_image_size[t] - raw_ptr)) {
+        return (void *)(g_app_image_base[t] + raw_ptr);
     }
     return (void *)raw_ptr;
 }
@@ -56,11 +73,12 @@ static int32_t sys_write_impl(uint32_t fd, uint32_t buf_ptr, uint32_t len, uint3
     const char *buf = (const char *)translate_app_ptr(buf_ptr, len);
     if (!ptr_ok(buf)) return -1;
     if (fd == 1 || fd == 2) {
-        if (g_out_cb) {
+        int t = sched_current();
+        if (g_out_cb[t]) {
             char tmp[2] = {0, 0};
             for (uint32_t i = 0; i < len; i++) {
                 tmp[0] = buf[i];
-                g_out_cb(tmp, g_out_ud);
+                g_out_cb[t](tmp, g_out_ud[t]);
             }
         } else {
             for (uint32_t i = 0; i < len; i++) vga_putchar(buf[i]);
@@ -80,16 +98,21 @@ static int32_t sys_read_impl(uint32_t fd, uint32_t buf_ptr, uint32_t len, uint32
         char kbuf[512];
         uint32_t max = (len < sizeof(kbuf)) ? len : (uint32_t)sizeof(kbuf);
         uint32_t n = 0;
+        int t = sched_current();
 
-        if (g_in_cb) {
-            /* Scheduler mode: yield to GUI task while waiting for keyboard.
-               The GUI task runs gui_pump() which feeds keys into the ring
-               buffer via term_inbuf_push(). g_in_cb drains them here.     */
+        if (g_in_cb[t]) {
+            /* Scheduler mode: yield to another task while waiting for
+               keyboard input. TASK_GUI runs gui_pump() which feeds keys
+               into this task's own window's ring buffer via
+               term_inbuf_push(); g_in_cb[t] drains them here. Meanwhile
+               sched_yield() also gives any OTHER runnable app task its
+               turn, so several windows' commands can block on stdin at
+               once without starving each other. */
             while (n < max) {
-                int c = g_in_cb(g_in_ud);
+                int c = g_in_cb[t](g_in_ud[t]);
                 if (c <= 0) {
                     if (n > 0 && kbuf[n-1] == '\n') break;
-                    sched_yield();  /* give GUI a frame to collect keypresses */
+                    sched_yield();  /* give other tasks a turn */
                     continue;
                 }
                 char ch = (char)c;
@@ -99,10 +122,10 @@ static int32_t sys_read_impl(uint32_t fd, uint32_t buf_ptr, uint32_t len, uint32
                 if (ch == '\b' || ch == 127) {
                     if (n > 0) {
                         n--;
-                        if (g_out_cb) {
-                            g_out_cb("\b", g_out_ud);
-                            g_out_cb(" ", g_out_ud);
-                            g_out_cb("\b", g_out_ud);
+                        if (g_out_cb[t]) {
+                            g_out_cb[t]("\b", g_out_ud[t]);
+                            g_out_cb[t](" ", g_out_ud[t]);
+                            g_out_cb[t]("\b", g_out_ud[t]);
                         }
                     }
                     continue;
@@ -110,9 +133,9 @@ static int32_t sys_read_impl(uint32_t fd, uint32_t buf_ptr, uint32_t len, uint32
 
                 kbuf[n++] = ch;
                 /* Echo the character so user sees what they typed */
-                if (g_out_cb) {
+                if (g_out_cb[t]) {
                     char echo[2] = { ch, 0 };
-                    g_out_cb(echo, g_out_ud);
+                    g_out_cb[t](echo, g_out_ud[t]);
                 } else {
                     vga_putchar(ch);
                 }
@@ -200,8 +223,9 @@ static int32_t sys_exit_impl(uint32_t code, uint32_t a1, uint32_t a2, uint32_t a
     (void)a2;
     (void)a3;
     (void)a4;
-    g_app_exit_requested = true;
-    g_app_exit_code = (int)code;
+    int t = sched_current();
+    g_app_exit_requested[t] = true;
+    g_app_exit_code[t] = (int)code;
     return (int32_t)code;
 }
 
@@ -281,12 +305,13 @@ static int32_t sys_brk_impl(uint32_t addr, uint32_t a1, uint32_t a2, uint32_t a3
     (void)a2;
     (void)a3;
     (void)a4;
-    if (g_brk_limit == 0 || g_brk_base == 0) return -1;
-    if (addr == 0) return (int32_t)g_brk_current;
-    if (addr < g_brk_base) return -1;
-    if (addr > g_brk_limit) return -1;
-    g_brk_current = addr;
-    return (int32_t)g_brk_current;
+    int t = sched_current();
+    if (g_brk_limit[t] == 0 || g_brk_base[t] == 0) return -1;
+    if (addr == 0) return (int32_t)g_brk_current[t];
+    if (addr < g_brk_base[t]) return -1;
+    if (addr > g_brk_limit[t]) return -1;
+    g_brk_current[t] = addr;
+    return (int32_t)g_brk_current[t];
 }
 
 static int32_t sys_getpid_impl(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4) {
@@ -370,42 +395,61 @@ void syscall_init(void) {
     idt_register_handler(0x80, syscall_dispatch_handler);
 }
 
+// All of these -- app_begin, exit_requested/code, set_app_image, set_app_heap
+// -- are called from *inside* the currently-executing app task's own call
+// stack (by e32_loader.c, which runs on that task's own stack after the
+// scheduler has already switched into it), so indexing by sched_current()
+// here is always correct without needing an explicit slot argument: each
+// task only ever touches its own slot of these arrays, even though several
+// slots' worth of state now coexist simultaneously.
+
 void syscall_app_begin(void) {
-    g_app_exit_requested = false;
-    g_app_exit_code = 0;
+    int t = sched_current();
+    g_app_exit_requested[t] = false;
+    g_app_exit_code[t] = 0;
 }
 
 bool syscall_app_exit_requested(void) {
-    return g_app_exit_requested;
+    return g_app_exit_requested[sched_current()];
 }
 
 int syscall_app_exit_code(void) {
-    return (int)g_app_exit_code;
+    return (int)g_app_exit_code[sched_current()];
 }
 
 void syscall_set_app_image(const void *base, uint32_t size) {
-    g_app_image_base = (const uint8_t *)base;
-    g_app_image_size = size;
+    int t = sched_current();
+    g_app_image_base[t] = (const uint8_t *)base;
+    g_app_image_size[t] = size;
 }
 
 void syscall_set_app_heap(uint32_t brk_base, uint32_t brk_limit) {
-    g_brk_base = brk_base;
-    g_brk_current = brk_base;
-    g_brk_limit = brk_limit;
+    int t = sched_current();
+    g_brk_base[t] = brk_base;
+    g_brk_current[t] = brk_base;
+    g_brk_limit[t] = brk_limit;
 }
 
-void syscall_set_output_cb(void (*cb)(const char *, void *), void *ud) {
-    g_out_cb = cb;
-    g_out_ud = ud;
+// syscall_set_output_cb / syscall_set_input_cb ARE given an explicit slot:
+// unlike the functions above, these are called by the GUI task *before* it
+// switches into a freshly-allocated app slot (see sched_alloc_app_slot() +
+// sched_run_app() in gui_desktop.c), so sched_current() at the call site
+// would still be TASK_GUI, not the target slot.
+void syscall_set_output_cb(int slot, void (*cb)(const char *, void *), void *ud) {
+    if (slot < 0 || slot >= SCHED_TASKS) return;
+    g_out_cb[slot] = cb;
+    g_out_ud[slot] = ud;
 }
 
 void syscall_debug_puts(const char *s) {
-    if (g_out_cb) { g_out_cb(s, g_out_ud); } else { extern void vga_puts(const char *); vga_puts(s); }
+    int t = sched_current();
+    if (g_out_cb[t]) { g_out_cb[t](s, g_out_ud[t]); } else { extern void vga_puts(const char *); vga_puts(s); }
 }
 
-void syscall_set_input_cb(int (*cb)(void *), void *ud) {
-    g_in_cb = cb;
-    g_in_ud = ud;
+void syscall_set_input_cb(int slot, int (*cb)(void *), void *ud) {
+    if (slot < 0 || slot >= SCHED_TASKS) return;
+    g_in_cb[slot] = cb;
+    g_in_ud[slot] = ud;
 }
 
 // GUI-aware blocking key read for shell builtins.
@@ -419,8 +463,8 @@ key_event_t syscall_wait_key(void) {
             if (ev.released) continue;
             return ev;
         }
-        if (g_in_cb) {
-            sched_yield();   // let GUI pump a frame and collect keypresses
+        if (g_in_cb[sched_current()]) {
+            sched_yield();   // let GUI (or other app tasks) get a turn
         } else {
             asm volatile("hlt");  // VGA text mode: wait for IRQ
         }

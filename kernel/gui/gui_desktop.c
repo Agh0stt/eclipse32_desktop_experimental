@@ -708,10 +708,42 @@ static int32_t win_idx_by_id(uint32_t id) {
     return -1;
 }
 
-// Set to 1 while a SDK app is running in TASK_APP via the terminal.
-// gui_pump_sdk() uses this to yield to the app between chrome and bb_present.
-static uint8_t     g_sdk_app_active = 0;
-uint8_t gui_sdk_is_active(void) { return g_sdk_app_active; }
+// Set of terminal windows that currently have an app task running (launched
+// via sched_alloc_app_slot() + sched_run_app() in render_terminal() below).
+// gui_pump() walks this set once per frame to give each of them a turn to
+// draw/run before bb_present(), instead of the old design's single
+// g_sdk_app_active flag + g_term_win pointer, which could only ever track
+// one running app system-wide. Sized to SCHED_MAX_APPS since that's the
+// scheduler's own hard cap on concurrently-running app tasks.
+static Window *g_active_app_wins[SCHED_MAX_APPS];
+static int32_t g_active_app_win_count = 0;
+
+static void active_app_win_add(Window *w) {
+    for (int32_t i = 0; i < g_active_app_win_count; i++)
+        if (g_active_app_wins[i] == w) return; // already tracked
+    if (g_active_app_win_count < SCHED_MAX_APPS)
+        g_active_app_wins[g_active_app_win_count++] = w;
+}
+
+static void gui_sdk_note_window_idle(Window *w) {
+    for (int32_t i = 0; i < g_active_app_win_count; i++) {
+        if (g_active_app_wins[i] == w) {
+            g_active_app_wins[i] = g_active_app_wins[--g_active_app_win_count];
+            return;
+        }
+    }
+}
+
+// True if ANY app window is currently active. Kept for compatibility with
+// existing callers that only cared about "is anything running", now that
+// several windows may be running at once.
+uint8_t gui_sdk_is_active(void) { return g_active_app_win_count > 0; }
+
+// Which window each scheduler task slot belongs to, so syscalls made from
+// inside that task (e.g. sys_gui_poll_event) can find their way back to
+// the right window without a single global "the" app window. Indexed by
+// scheduler task id; slot 0 (TASK_GUI) is unused.
+static Window  *g_slot_window[SCHED_TASKS];
 // Set to 1 while the user is dragging a window title bar.
 static uint8_t     g_dragging = 0;
 // Resize state
@@ -1031,11 +1063,23 @@ static void close_window(int32_t idx) {
         }
     }
 
-    // If this was an SDK window, clear the active flag so gui_pump stops
-    // yielding to the (now-exited) app task.
-    if (cw->app == APP_SDK) {
-        g_sdk_app_active = 0;
+    // If this window still had an app task running, release its scheduler
+    // slot and I/O routing now. The task's own C stack is simply abandoned
+    // (it never returns, but its stack is a static per-slot buffer we're
+    // about to mark free for reuse) -- acceptable for a cooperative hobby
+    // scheduler with no real address-space isolation. Skipping this would
+    // leak an app slot every time a window is closed mid-command, and with
+    // only SCHED_MAX_APPS slots total that would eventually make it
+    // impossible to launch anything anywhere, not just in this window.
+    if (cw->st.term_app_running && cw->st.term_app_slot > TASK_GUI) {
+        sched_release_app_slot(cw->st.term_app_slot);
+        syscall_set_output_cb(cw->st.term_app_slot, NULL, NULL);
+        syscall_set_input_cb(cw->st.term_app_slot, NULL, NULL);
+        g_slot_window[cw->st.term_app_slot] = NULL;
+        cw->st.term_app_running = 0;
+        cw->st.term_app_slot = TASK_GUI;
     }
+    gui_sdk_note_window_idle(cw);
 
     for (int32_t i = idx; i < g_nwins-1; i++) g_wins[i] = g_wins[i+1];
     g_nwins--;
@@ -2590,17 +2634,22 @@ static void render_piano(Window *w, int32_t mx, int32_t my, uint8_t click){
 }
 
 // --- Terminal ---
-// Command buffer: copied before launching app task (avoids stack lifetime issues)
-static char     g_term_cmd_buf[256];
-static Window  *g_term_win = NULL; /* window running the current SDK app */
+#define STR_(x) #x
+#define STR(x)  STR_(x)
+
+// Command buffer, one per app slot: copied before launching that slot's
+// app task (avoids stack lifetime issues). Indexed by (slot - 1) since
+// slot 0 is TASK_GUI and never launches a command this way.
+static char     g_term_cmd_buf[SCHED_MAX_APPS][256];
 
 // Forward declaration (defined below)
 static void term_out_cb(const char *c, void *ud);
 
-// App task runner — executed in TASK_APP context by the scheduler
+// App task runner — executed in the app's own task slot by the scheduler
 static void term_app_runner(void *ud) {
     Window *w = (Window *)ud;
-    shell_exec_line(g_term_cmd_buf, term_out_cb, (void*)w);
+    int slot = sched_current(); // our own slot -- set by sched_run_app() just before entry
+    shell_exec_line(g_term_cmd_buf[slot - 1], term_out_cb, (void*)w);
     // sched_app_done() is called by the scheduler trampoline after we return
 }
 
@@ -2669,11 +2718,12 @@ static void render_terminal(Window *w, int32_t mx, int32_t my, uint8_t click, ui
     // Deferred teardown: the app launch in render_terminal no longer spins a
     // blocking gui_pump() loop.  Instead we detect here, each frame, whether
     // the previously-launched app has finished and clean up if so.
-    if (w->st.term_app_running && !sched_app_running()) {
-        g_sdk_app_active = 0;
-        syscall_set_output_cb(NULL, NULL);
-        syscall_set_input_cb(NULL, NULL);
+    if (w->st.term_app_running && !sched_slot_running(w->st.term_app_slot)) {
+        gui_sdk_note_window_idle(w);
+        syscall_set_output_cb(w->st.term_app_slot, NULL, NULL);
+        syscall_set_input_cb(w->st.term_app_slot, NULL, NULL);
         w->st.term_app_running = 0;
+        w->st.term_app_slot = TASK_GUI;
         // Append the prompt for the next command
         if (w->st.text_len < WIN_TEXT_BUF - 4) {
             w->st.text[w->st.text_len++] = '>';
@@ -2740,7 +2790,14 @@ static void render_terminal(Window *w, int32_t mx, int32_t my, uint8_t click, ui
     // execution never resumed. From the user's perspective this looked
     // exactly like a freeze right after "[HTTP] Connected", since that was
     // the last output printed before the first yield deep in tcp_send().
-    if (w->st.term_app_running && sched_app_running()) {
+    // sched_yield() from GUI context round-robins through EVERY runnable
+    // app slot in one call (each one runs until it yields in turn, handing
+    // off to the next, until the ring comes back to us) -- so a single call
+    // here still gives every concurrently-running window's app a turn this
+    // frame, not just this one window's. We still gate the call on this
+    // window having something running so idle windows don't burn a
+    // redundant no-op yield.
+    if (w->st.term_app_running && sched_slot_running(w->st.term_app_slot)) {
         sched_yield();
     }
 
@@ -2748,11 +2805,12 @@ static void render_terminal(Window *w, int32_t mx, int32_t my, uint8_t click, ui
     if(!active) return;
 
     if(w->st.term_app_running){
-        // For SDK GUI apps (g_sdk_app_active), keyboard input is pushed into
-        // term_inbuf BEFORE the sched_yield() in the g_sdk_app_active branch
-        // above, so the app sees it on the same frame it polls. Don't push
-        // again here or keys will be doubled.
-        if (!g_sdk_app_active) {
+        // For SDK GUI apps, keyboard input is pushed into term_inbuf BEFORE
+        // the sched_yield() in gui_pump's active-app-windows loop, so the
+        // app sees it on the same frame it polls. Don't push again here or
+        // keys will be doubled. That loop only ever pushes into the FRONT
+        // window (keyboard focus), so background windows still get here.
+        if (!(g_front >= 0 && g_front < g_nwins && &g_wins[g_front] == w)) {
             char kc=kb_getchar_nowait();
             if(kc) term_inbuf_push(w, kc);
         }
@@ -2772,44 +2830,66 @@ static void render_terminal(Window *w, int32_t mx, int32_t my, uint8_t click, ui
                 kstrcpy(w->st.text,"");
                 w->st.text_len=0;
             } else if(cmd[0]!=0){
-                // Set up I/O callbacks for the app task
-                w->st.term_app_running = 1;
-                w->st.term_in_head = w->st.term_in_tail = 0;
-                syscall_set_output_cb(term_out_cb, (void*)w);
-                syscall_set_input_cb(term_in_cb, (void*)w);
-                kstrcpy(g_term_cmd_buf, cmd);
-
-                // Launch app in TASK_APP.  Set g_sdk_app_active BEFORE the
-                // first sched_run_app so gui_pump's yield-to-app guard fires
-                // correctly on every frame, including the very first.
-                // We do NOT loop here — render_terminal runs inside gui_pump's
-                // render pass, so calling gui_pump() recursively would corrupt
-                // the stack.  Instead we return immediately; the top-level
-                // gui_pump loop re-enters each frame, hits the g_sdk_app_active
-                // branch, yields to the app, and the app draws its content.
-                // Teardown is handled at the top of render_terminal on the
-                // first frame after sched_app_running() becomes false.
-                g_sdk_app_active = 1;
-                g_term_win = w;
-                sched_run_app(term_app_runner, (void*)w);
-                // sched_run_app does the first yield; if the app finished
-                // synchronously (no sys_read), sched_app_running() is already
-                // false here and we fall through to teardown below.
-                if (!sched_app_running()) {
-                    // App finished synchronously (no sys_read calls).
-                    g_sdk_app_active = 0;
-                    g_term_win = NULL;
-                    syscall_set_output_cb(NULL, NULL);
-                    syscall_set_input_cb(NULL, NULL);
-                    w->st.term_app_running = 0;
+                // Reserve a scheduler task slot for this window's app. Only
+                // SCHED_MAX_APPS windows can have a program running at once
+                // -- this is the hard limit surfaced by the new multi-app
+                // scheduler. Past that, tell the user plainly instead of
+                // silently stomping on another window's running program.
+                int slot = sched_alloc_app_slot();
+                if (slot == TASK_NONE) {
+                    const char *msg = "eclipse32: too many apps running "
+                        "(max " STR(SCHED_MAX_APPS) " at once) -- "
+                        "close or wait for one to finish, then retry.\n";
+                    term_out_cb(msg, (void*)w);
                     if (w->st.text_len < WIN_TEXT_BUF - 4) {
                         w->st.text[w->st.text_len++] = '>';
                         w->st.text[w->st.text_len++] = ' ';
                         w->st.text[w->st.text_len]   = 0;
                     }
+                } else {
+                    // Set up I/O callbacks for this specific app task slot
+                    w->st.term_app_running = 1;
+                    w->st.term_app_slot = slot;
+                    w->st.term_in_head = w->st.term_in_tail = 0;
+                    syscall_set_output_cb(slot, term_out_cb, (void*)w);
+                    syscall_set_input_cb(slot, term_in_cb, (void*)w);
+                    kstrcpy(g_term_cmd_buf[slot - 1], cmd);
+
+                    // Track this window as having a running app BEFORE the
+                    // first sched_run_app so gui_pump's per-frame yield loop
+                    // fires correctly on every frame, including the very
+                    // first. We do NOT loop here — render_terminal runs
+                    // inside gui_pump's render pass, so calling gui_pump()
+                    // recursively would corrupt the stack. Instead we return
+                    // immediately; the top-level gui_pump loop re-enters
+                    // each frame, walks all active app windows, yields to
+                    // each in turn, and they draw their content. Teardown is
+                    // handled at the top of render_terminal on the first
+                    // frame after sched_slot_running(slot) becomes false.
+                    active_app_win_add(w);
+                    g_slot_window[slot] = w;
+                    sched_run_app(slot, term_app_runner, (void*)w);
+                    // sched_run_app does the first yield; if the app finished
+                    // synchronously (no sys_read), the slot is already free
+                    // here and we fall through to teardown below.
+                    if (!sched_slot_running(slot)) {
+                        // App finished synchronously (no sys_read calls).
+                        gui_sdk_note_window_idle(w);
+                        g_slot_window[slot] = NULL;
+                        syscall_set_output_cb(slot, NULL, NULL);
+                        syscall_set_input_cb(slot, NULL, NULL);
+                        w->st.term_app_running = 0;
+                        w->st.term_app_slot = TASK_GUI;
+                        if (w->st.text_len < WIN_TEXT_BUF - 4) {
+                            w->st.text[w->st.text_len++] = '>';
+                            w->st.text[w->st.text_len++] = ' ';
+                            w->st.text[w->st.text_len]   = 0;
+                        }
+                    }
+                    // If still running: deferred teardown fires in
+                    // render_terminal on the frame after the app calls
+                    // sched_app_done().
                 }
-                // If still running: deferred teardown fires in render_terminal
-                // on the frame after the app calls sched_app_done().
             }
             /* prompt appended by deferred teardown above */
         }else if(kc=='\b'||kc==127){
@@ -4045,25 +4125,38 @@ void gui_pump(void) {
             render_app(w, mx, my, click && active, active);
         }
 
-        // 3b. If a SDK app is running in TASK_APP, yield to it here so it can
-        //     draw its content into g_bb on top of the chrome we just drew.
-        //     It will sched_yield() back to us when done (via SYS_GUI_PUMP).
-        //     We ALWAYS yield, even while dragging — skipping the yield would
-        //     leave TASK_APP with no valid TASK_GUI context to return to when
-        //     the app calls its own gui_pump()→sched_yield(), causing a crash.
-        //     Instead we let the app draw freely, then blit its pixels from the
-        //     old coords to the new coords within g_bb, so content tracks the
-        //     chrome exactly with no white flash.
-        if (g_sdk_app_active) {
-            // Read keyboard input NOW, before yielding to the app, so that
-            // gui_poll_event() inside the app sees the key on this same frame.
-            // render_terminal's keyboard section runs AFTER the yield, which
-            // is too late — the app has already called gui_poll_event() and
-            // got back an empty key. We push into term_inbuf here so it's
-            // ready when the app drains it via gui_desktop_sdk_poll_key().
-            if (g_term_win) {
-                char _sdk_key = kb_getchar_nowait();
-                if (_sdk_key) term_inbuf_push(g_term_win, _sdk_key);
+        // 3b. If any app windows have a task running, yield to them here so
+        //     each can draw its content into g_bb on top of the chrome we
+        //     just drew. A single sched_yield() call drives the ENTIRE ring
+        //     of runnable app tasks in turn (each one yields again as part
+        //     of its own per-frame work, per gui_sdk.c / sys_read, handing
+        //     off to the next until the ring comes back to us) -- so one
+        //     call here still gives every concurrently-running window a
+        //     turn this frame, exactly like the single-app version did for
+        //     its one app. We ALWAYS yield when anything is active, even
+        //     while dragging — skipping the yield would leave those tasks
+        //     with no valid TASK_GUI context to return to when they call
+        //     their own gui_pump()→sched_yield(), causing a crash.
+        //     Instead we let them draw freely, then blit their pixels from
+        //     the old coords to the new coords within g_bb, so content
+        //     tracks the chrome exactly with no white flash.
+        if (g_active_app_win_count > 0) {
+            // Read keyboard input NOW, before yielding, so that
+            // gui_poll_event() inside an app sees the key on this same
+            // frame. render_terminal's keyboard section runs AFTER the
+            // yield, which is too late — the app has already called
+            // gui_poll_event() and got back an empty key. We push into
+            // term_inbuf here so it's ready when the app drains it via
+            // gui_desktop_sdk_poll_key(). Only the FOCUSED (front) window
+            // receives the keystroke -- background app windows keep
+            // running but don't steal input from whichever window the
+            // user is actually typing into.
+            if (g_front >= 0 && g_front < g_nwins) {
+                Window *_focus = &g_wins[g_front];
+                if (_focus->st.term_app_running) {
+                    char _sdk_key = kb_getchar_nowait();
+                    if (_sdk_key) term_inbuf_push(_focus, _sdk_key);
+                }
             }
             // Update prev_btn BEFORE yielding so the next frame computes
             // click/release correctly even when we exit mid-frame here.
@@ -4260,12 +4353,18 @@ int gui_desktop_sdk_fs_list(char names[][EFS_FILENAME_MAX], int max) {
     return fs_list(names, max);
 }
 
-// Drain one character from the terminal input ring buffer for the currently
-// running SDK app.  Called by sys_gui_poll_event so GUI apps can read keys.
-// Returns 0 if no key is available.
+// Drain one character from the terminal input ring buffer for the CURRENTLY
+// EXECUTING app task's own window. Called by sys_gui_poll_event so GUI apps
+// can read keys. Returns 0 if no key is available. Looked up via
+// g_slot_window[] (indexed by scheduler task id) rather than a single
+// global "the" app window, since several windows can each have their own
+// app task running concurrently now -- this must resolve to whichever one
+// is actually asking.
 char gui_desktop_sdk_poll_key(void) {
-    if (!g_term_win) return 0;
-    Window *w = g_term_win;
+    int slot = sched_current();
+    if (slot <= TASK_GUI || slot >= SCHED_TASKS) return 0;
+    Window *w = g_slot_window[slot];
+    if (!w) return 0;
     if (w->st.term_in_head == w->st.term_in_tail) return 0;
     char c = w->st.term_inbuf[w->st.term_in_tail];
     w->st.term_in_tail = (w->st.term_in_tail + 1) % (uint32_t)sizeof(w->st.term_inbuf);

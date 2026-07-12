@@ -1,24 +1,10 @@
 // =============================================================================
-// Eclipse32 - Cooperative Task Scheduler  (sched.c)
+// Eclipse32 - Cooperative Multi-App Task Scheduler  (sched.c)
 // =============================================================================
-// Uses __builtin_setjmp / __builtin_longjmp for portable, compiler-assisted
-// context saving. No inline asm required. Works with zig cc -target x86-freestanding.
-//
-// Layout:
-//   TASK_GUI (task 0) — the gui_run() / gui_pump() loop, runs on the original
-//                        kernel stack inherited from kmain.
-//   TASK_APP (task 1) — the e32 app (shell_exec_line call), runs on its own
-//                        stack allocated statically below.
-//
-// Yield protocol:
-//   sched_yield() saves the caller's context into tasks[current].ctx, then
-//   restores tasks[other].ctx. The other task "returns" from its own
-//   sched_yield() call.
-//
-//   Special case: when TASK_GUI yields into a freshly initialised TASK_APP
-//   (first time), we instead longjmp to a tiny trampoline that sets up a
-//   new C stack frame and calls the app function. After the app returns the
-//   trampoline calls sched_app_done() which switches back to TASK_GUI.
+// See sched.h for the ring/round-robin model. This file replaces the old
+// fixed two-task (TASK_GUI / TASK_APP) scheduler with a ring of
+// SCHED_TASKS = 1 + SCHED_MAX_APPS tasks so several terminal windows can
+// each have a command or e32 program running concurrently.
 // =============================================================================
 
 #include "sched.h"
@@ -40,23 +26,72 @@ typedef struct {
 static task_t tasks[SCHED_TASKS];
 static int    current_task = TASK_GUI;
 
-// Static stack for TASK_APP
-static uint8_t app_stack[SCHED_STACK_SIZE] ALIGNED(16);
+// Static stacks, one per app slot (index 0..SCHED_MAX_APPS-1 <-> task id
+// 1..SCHED_MAX_APPS).
+static uint8_t app_stack[SCHED_MAX_APPS][SCHED_STACK_SIZE] ALIGNED(16);
 
-// App function + argument (set by sched_run_app before first switch)
-static sched_fn_t app_fn  = NULL;
-static void      *app_arg = NULL;
+// Per-slot app function + argument (set by sched_run_app before first switch)
+static sched_fn_t app_fn[SCHED_MAX_APPS];
+static void      *app_arg[SCHED_MAX_APPS];
 
-// ---- Internal trampoline ---------------------------------------------------
-// Called the very first time we switch into TASK_APP.
-// Runs on app_stack with a fresh frame.
+// Slot the trampoline should start running as. Only ever read/written while
+// no other task is executing (set immediately before the stack-switching
+// asm block below, consumed immediately after) so a single static is safe
+// even though several slots share this one variable over time.
+static int g_tramp_slot;
+
+// ---- Internal helpers -------------------------------------------------------
+
+// Returns the next RUNNABLE task after `from`, walking the ring and
+// wrapping around. Because TASK_GUI is always runnable once sched_init()
+// has run, this always finds *something* -- worst case it wraps all the
+// way back to `from` itself (meaning "nobody else is runnable").
+static int next_runnable(int from) {
+    for (int i = 1; i <= SCHED_TASKS; i++) {
+        int idx = (from + i) % SCHED_TASKS;
+        if (tasks[idx].runnable) return idx;
+    }
+    return from; // unreachable in practice: TASK_GUI is always runnable
+}
+
+// Called the very first time we switch into a given app slot.
+// Runs on that slot's own stack with a fresh frame.
 static NOINLINE void app_trampoline(void) {
-    // Execute the app
-    if (app_fn) app_fn(app_arg);
-    // When app returns, clean up
+    int slot = g_tramp_slot;
+    sched_fn_t fn  = app_fn[slot];
+    void      *arg = app_arg[slot];
+    if (fn) fn(arg);
+    // When the app returns, clean up and switch away. Never returns.
     sched_app_done();
-    // sched_app_done() does not return — it longjmps back to TASK_GUI.
     // Satisfy the compiler:
+    for (;;) asm volatile("hlt");
+}
+
+// Switch execution to `target`. Caller is responsible for having already
+// saved its own context (or for not needing to -- e.g. sched_app_done()
+// is tearing its task down and will never resume).
+static NOINLINE void switch_to(int target) {
+    current_task = target;
+
+    if (tasks[target].valid) {
+        // Task has a saved context from a previous yield -- resume it.
+        __builtin_longjmp(tasks[target].ctx, 1);
+    }
+
+    // First-ever entry into this task. Only app slots (task id >= 1) can
+    // hit this path -- TASK_GUI's context is always valid after sched_init().
+    int slot = target - 1;
+    g_tramp_slot = slot;
+    uint32_t new_esp = (uint32_t)(app_stack[slot] + SCHED_STACK_SIZE) - 16;
+    void (*tramp)(void) = app_trampoline;
+    asm volatile(
+        "mov %0, %%esp\n\t"     // switch to this slot's own stack
+        "call *%1\n\t"          // call trampoline (never returns here)
+        :
+        : "r"(new_esp), "r"(tramp)
+        : "memory"
+    );
+    // Unreachable
     for (;;) asm volatile("hlt");
 }
 
@@ -66,6 +101,10 @@ void sched_init(void) {
     for (int i = 0; i < SCHED_TASKS; i++) {
         tasks[i].valid    = false;
         tasks[i].runnable = false;
+    }
+    for (int s = 0; s < SCHED_MAX_APPS; s++) {
+        app_fn[s]  = NULL;
+        app_arg[s] = NULL;
     }
     // TASK_GUI starts as current (we're already running in it)
     tasks[TASK_GUI].runnable = true;
@@ -77,87 +116,95 @@ int sched_current(void) {
 }
 
 bool sched_app_running(void) {
-    return tasks[TASK_APP].runnable;
+    return current_task != TASK_GUI;
+}
+
+bool sched_slot_running(int slot) {
+    if (slot <= TASK_GUI || slot >= SCHED_TASKS) return false;
+    return tasks[slot].runnable;
+}
+
+int sched_active_app_count(void) {
+    int n = 0;
+    for (int i = 1; i < SCHED_TASKS; i++) {
+        if (tasks[i].runnable) n++;
+    }
+    return n;
+}
+
+int sched_alloc_app_slot(void) {
+    for (int i = 1; i < SCHED_TASKS; i++) {
+        if (!tasks[i].runnable) {
+            // Reserve it now so a second alloc call before the matching
+            // sched_run_app() (there shouldn't be one -- single-threaded,
+            // cooperative -- but be defensive) won't hand out the same slot.
+            tasks[i].runnable = true;
+            tasks[i].valid    = false;
+            return i;
+        }
+    }
+    return TASK_NONE; // SCHED_MAX_APPS reached -- caller must handle this
+}
+
+void sched_release_app_slot(int slot) {
+    if (slot <= TASK_GUI || slot >= SCHED_TASKS) return;
+    tasks[slot].runnable = false;
+    tasks[slot].valid    = false;
+    app_fn[slot - 1]  = NULL;
+    app_arg[slot - 1] = NULL;
 }
 
 // ---------------------------------------------------------------------------
-// sched_yield — the heart of the scheduler
+// sched_yield — round-robin through the ring of runnable tasks
 // ---------------------------------------------------------------------------
 void sched_yield(void) {
-    int me    = current_task;
-    int other = (me == TASK_GUI) ? TASK_APP : TASK_GUI;
+    int me     = current_task;
+    int target = next_runnable(me);
+    if (target == me) return; // nobody else runnable -- cheap no-op
 
-    // If the other task isn't runnable, nothing to switch to — just return.
-    if (!tasks[other].runnable) return;
-
-    // Save our context. __builtin_setjmp returns 0 the first time (we saved),
-    // and non-zero when we are restored (resumed by the other task).
+    // Save our context. __builtin_setjmp returns 0 the first time (we just
+    // saved), and non-zero when we are later resumed by some other task.
     if (__builtin_setjmp(tasks[me].ctx) != 0) {
-        // We've been resumed — restore current_task and return to caller.
         current_task = me;
         return;
     }
     tasks[me].valid = true;
 
-    // Switch to the other task
-    current_task = other;
+    switch_to(target);
+}
 
-    if (tasks[other].valid) {
-        // Other task has a saved context — restore it.
-        __builtin_longjmp(tasks[other].ctx, 1);
-    } else {
-        // First time switching into TASK_APP: manually set up its stack
-        // and jump to the trampoline.
-        // We do this with a small inline asm that switches ESP to the top
-        // of app_stack and calls app_trampoline().
-        uint32_t new_esp = (uint32_t)(app_stack + SCHED_STACK_SIZE) - 16;
-        void (*tramp)(void) = app_trampoline;
-        asm volatile(
-            "mov %0, %%esp\n\t"     // switch to app stack
-            "call *%1\n\t"          // call trampoline (never returns here)
-            :
-            : "r"(new_esp), "r"(tramp)
-            : "memory"
-        );
-        // Unreachable
-        for (;;) asm volatile("hlt");
+// ---------------------------------------------------------------------------
+// sched_run_app — launch an app in the given (already-allocated) slot
+// ---------------------------------------------------------------------------
+void sched_run_app(int slot, sched_fn_t fn, void *arg) {
+    if (slot <= TASK_GUI || slot >= SCHED_TASKS) return;
+
+    app_fn[slot - 1]  = fn;
+    app_arg[slot - 1] = arg;
+    tasks[slot].valid    = false;
+    tasks[slot].runnable = true;
+
+    int me = current_task;
+    if (__builtin_setjmp(tasks[me].ctx) != 0) {
+        current_task = me;
+        return;
     }
+    tasks[me].valid = true;
+
+    switch_to(slot);
 }
 
 // ---------------------------------------------------------------------------
-// sched_run_app — launch an app in TASK_APP context
-// ---------------------------------------------------------------------------
-void sched_run_app(sched_fn_t fn, void *arg) {
-    app_fn  = fn;
-    app_arg = arg;
-
-    // Reset TASK_APP so sched_yield knows it's a fresh start
-    tasks[TASK_APP].valid    = false;
-    tasks[TASK_APP].runnable = true;
-
-    // First switch into the app.  After this returns the app has finished
-    // (sched_app_done cleared runnable and longjmped back here).
-    // Mid-run yields come back here too — the caller (gui_desktop) must loop
-    // calling sched_yield_app() to pump frames until runnable goes false.
-    sched_yield();
-}
-
-// ---------------------------------------------------------------------------
-// sched_app_done — called when the app finishes; returns to TASK_GUI
+// sched_app_done — called from within an app task when it finishes.
+// Frees its slot and hands control to the next runnable task in the ring
+// (guaranteed to find at least TASK_GUI). Never returns.
 // ---------------------------------------------------------------------------
 void sched_app_done(void) {
-    // Mark app as no longer runnable
-    tasks[TASK_APP].runnable = false;
-    tasks[TASK_APP].valid    = false;
-    app_fn  = NULL;
-    app_arg = NULL;
+    int me = current_task;
+    sched_release_app_slot(me);
 
-    // Switch back to GUI — it must have a valid saved context because it
-    // called sched_run_app -> sched_yield and is waiting for us.
-    current_task = TASK_GUI;
-    if (tasks[TASK_GUI].valid) {
-        __builtin_longjmp(tasks[TASK_GUI].ctx, 1);
-    }
-    // Should never reach here
+    int target = next_runnable(me);
+    switch_to(target);
+    // Unreachable
     for (;;) asm volatile("hlt");
 }

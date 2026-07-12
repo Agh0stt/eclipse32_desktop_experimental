@@ -66,7 +66,14 @@ int syscall_app_exit_code(void);
 void syscall_set_app_image(const void *base, uint32_t size);
 void *syscall_translate_app_ptr(uint32_t raw_ptr, uint32_t len);
 void syscall_set_app_heap(uint32_t brk_base, uint32_t brk_limit);
-void syscall_set_output_cb(void (*cb)(const char *, void *), void *ud);
+// `slot` is the scheduler task id (TASK_GUI or an app slot from
+// sched_alloc_app_slot()) these callbacks apply to. Callbacks are per-slot
+// so multiple terminal windows can each have their own app task running
+// concurrently, each redirecting its stdout/stdin to its own window without
+// clobbering the others. Pass TASK_GUI's own slot (0) meaninglessly if you
+// really want "no redirection" cleared for slot 0, but in practice these
+// are always set/cleared for an app slot (1..SCHED_MAX_APPS).
+void syscall_set_output_cb(int slot, void (*cb)(const char *, void *), void *ud);
 void syscall_debug_puts(const char *s);
-void syscall_set_input_cb(int (*cb)(void *), void *ud);
+void syscall_set_input_cb(int slot, int (*cb)(void *), void *ud);
 key_event_t syscall_wait_key(void);  // GUI-aware blocking key read (yields in GUI mode)

@@ -4,11 +4,22 @@
 #include "../fs/fat32/fat32.h"
 #include "../initramfs/initramfs.h"
 #include "../syscall/syscall.h"
+#include "../sched/sched.h"
 
 typedef int (*e32_entry_t)(int argc, char **argv);
 
 #define E32_RUNTIME_MAX (256 * 1024)
-static uint8_t g_e32_runtime[E32_RUNTIME_MAX];
+
+// One runtime image buffer PER APP TASK SLOT, not a single shared global.
+// A single shared buffer was safe under the old scheduler because exactly
+// one e32 program could ever be executing anywhere in the OS at a time. Now
+// that several terminal windows can each have their own e32 program running
+// concurrently (one blocked in sys_read waiting on stdin while another is
+// mid-execution), a shared buffer would let one window's program silently
+// overwrite another's code/data/heap the moment both had something loaded.
+// Indexed by scheduler task id, same convention as the syscall.c per-slot
+// state; index 0 (TASK_GUI) is unused.
+static uint8_t g_e32_runtime[SCHED_TASKS][E32_RUNTIME_MAX];
 
 static bool e32_validate(const e32_header_t *h, uint32_t file_size) {
     const uint32_t max_image = E32_RUNTIME_MAX;
@@ -45,7 +56,11 @@ int e32_exec_file_argv(const char *path, int argc, char **argv) {
         return -14;
     }
 
-    uint8_t *image = g_e32_runtime;
+    // Each task (TASK_GUI or an app slot) gets its own runtime buffer, so
+    // a program running in one terminal window can't stomp on a program
+    // running concurrently in another window.
+    int slot = sched_current();
+    uint8_t *image = g_e32_runtime[slot];
     kmemset(image, 0, h.image_size + h.bss_size);
 
     if (fat32_seek(fd, (int32_t)h.code_offset, FAT32_SEEK_SET) < 0 ||
@@ -68,7 +83,7 @@ int e32_exec_file_argv(const char *path, int argc, char **argv) {
     {
         uint32_t img_end = (uint32_t)image + h.image_size + h.bss_size;
         uint32_t heap_base = PAGE_ALIGN_UP(img_end);
-        uint32_t heap_limit = (uint32_t)g_e32_runtime + E32_RUNTIME_MAX;
+        uint32_t heap_limit = (uint32_t)image + E32_RUNTIME_MAX;
         if (heap_base < heap_limit)
             syscall_set_app_heap(heap_base, heap_limit);
         else
