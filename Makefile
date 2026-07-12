@@ -39,7 +39,13 @@ DISK_IMG     := $(BUILD)/eclipse32.img
 
 # --- Boot splash (raw 800x600x24bpp BGR, blitted directly into VBE framebuffer) ---
 SPLASH_RAW   := assets/splash.raw
-SPLASH_LBA   := 460
+# SPLASH_LBA is computed dynamically in the kernel link rule (see below) and
+# written to build/splash_lba.txt, because it must always sit past the end
+# of the kernel image. Do NOT hardcode this — a hardcoded value silently
+# overlaps the kernel once the kernel grows past its old budget, corrupting
+# the tail of kernel.bin on disk (symptom: boots fine through splash, then
+# exits/crashes immediately after).
+SPLASH_LBA_FILE := $(BUILD)/splash_lba.txt
 HELLO_APP_BIN := $(BUILD)/apps/hello.bin
 HELLO_APP_E32 := $(BUILD)/apps/HELLO.E32
 CRT0_OBJ      := $(BUILD)/apps/sdk/crt0.o
@@ -197,8 +203,17 @@ $(KERNEL_BIN): $(KERNEL_OBJS) kernel/linker.ld
 	 LAST_CHUNK=$$(( $$KERN_SECTS - 381 )); \
 	 echo "[INFO] Kernel size: $$KERN_BYTES bytes = $$KERN_SECTS sectors (last chunk: $$LAST_CHUNK)"; \
 	 sed -i "s/^%define KERNEL_SECTORS.*/%define KERNEL_SECTORS    $$KERN_SECTS/" boot/stage2/stage2.asm; \
-	 sed -i "/KERNEL_LBA_START + 381/{n; s/mov word  \[dap\.count\],  [0-9]*/mov word  [dap.count],  $$LAST_CHUNK/}" boot/stage2/stage2.asm; \
-	 echo "[INFO] stage2.asm patched: KERNEL_SECTORS=$$KERN_SECTS last_chunk=$$LAST_CHUNK"
+	 sed -i "/KERNEL_LBA_START + 381/{n;n; s/mov word  \[dap\.count\],  [0-9]*/mov word  [dap.count],  $$LAST_CHUNK/}" boot/stage2/stage2.asm; \
+	 echo "[INFO] stage2.asm patched: KERNEL_SECTORS=$$KERN_SECTS last_chunk=$$LAST_CHUNK"; \
+	 KERNEL_LBA_START=17; SPLASH_SECTORS=4608; FAT32_LBA=6144; MARGIN=40; \
+	 SPLASH_LBA=$$(( ( (KERNEL_LBA_START + KERN_SECTS + MARGIN + 49) / 50 ) * 50 )); \
+	 if [ $$(( SPLASH_LBA + SPLASH_SECTORS )) -gt $$FAT32_LBA ]; then \
+	   echo "[ERROR] Kernel too large: splash would overlap FAT32 partition (SPLASH_LBA=$$SPLASH_LBA, needs to end by $$FAT32_LBA). Move FAT32_LBA/PART_LBA in tools/write_mbr.py and tools/format_fat32.py further out."; \
+	   exit 1; \
+	 fi; \
+	 sed -i "s/^%define SPLASH_LBA_START.*/%define SPLASH_LBA_START  $$SPLASH_LBA/" boot/stage2/stage2.asm; \
+	 echo $$SPLASH_LBA > $(SPLASH_LBA_FILE); \
+	 echo "[INFO] stage2.asm patched: SPLASH_LBA_START=$$SPLASH_LBA"
 
 # =============================================================================
 # Built-in apps (baked into disk image at build time)
@@ -349,7 +364,7 @@ $(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP
 	dd if=$(STAGE1_BIN)  of=$@ bs=512 seek=0  conv=notrunc status=none
 	dd if=$(STAGE2_BIN)  of=$@ bs=512 seek=1  conv=notrunc status=none
 	dd if=$(KERNEL_BIN)  of=$@ bs=512 seek=17 conv=notrunc status=none
-	dd if=$(SPLASH_RAW)  of=$@ bs=512 seek=$(SPLASH_LBA) conv=notrunc status=none
+	dd if=$(SPLASH_RAW)  of=$@ bs=512 seek=$$(cat $(SPLASH_LBA_FILE)) conv=notrunc status=none
 	python3 tools/write_mbr.py $@
 	python3 tools/format_fat32.py $@
 	python3 tools/inject_fat32_file.py $@ $(HELLO_APP_E32) HELLO.E32

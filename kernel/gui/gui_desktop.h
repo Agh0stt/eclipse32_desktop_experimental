@@ -62,8 +62,12 @@ void apply_theme(int theme_id);
 // ============================================================
 // Screen / layout
 // ============================================================
-#define SCREEN_W    800
-#define SCREEN_H    600
+// Actual hardware mode set by stage2.asm's setup_vbe (VBE mode 0x118 =
+// 1024x768x24bpp linear framebuffer). SCREEN_W/H were previously hardcoded
+// to 800x600, which only used the top-left corner of the real framebuffer —
+// bumped to match what the BIOS is actually giving us.
+#define SCREEN_W    1024
+#define SCREEN_H    768
 #define TASKBAR_H    30
 #define TITLE_BAR_H  20
 #define BORDER_W      2
