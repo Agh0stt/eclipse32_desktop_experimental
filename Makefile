@@ -80,6 +80,10 @@ MEOW_OBJ      := $(BUILD)/apps/meow.o
 MEOW_ELF      := $(BUILD)/apps/meow.elf
 MEOW_BIN      := $(BUILD)/apps/meow.bin
 MEOW_E32      := $(BUILD)/apps/MEOW.E32
+PYTHON_OBJ    := $(BUILD)/apps/python.o
+PYTHON_ELF    := $(BUILD)/apps/python.elf
+PYTHON_BIN    := $(BUILD)/apps/python.bin
+PYTHON_E32    := $(BUILD)/apps/PYTHON.E32
 WRITER_INS    := $(BUILD)/WRITER.INS
 LIBC_STRING_OBJ := $(BUILD)/apps/sdk/libc/string.o
 LIBC_UNISTD_OBJ := $(BUILD)/apps/sdk/libc/unistd.o
@@ -137,7 +141,7 @@ KERNEL_OBJS := \
     $(patsubst %.asm, $(BUILD)/%.asm.o, $(KERNEL_ASM_SRCS))
 
 # =============================================================================
-.PHONY: all clean run run-debug run-apps
+.PHONY: all clean run run-debug run-apps install-python
 
 all: $(DISK_IMG)
 	@echo ""
@@ -349,6 +353,27 @@ $(MEOW_BIN): $(MEOW_ELF) | $(BUILD)
 $(MEOW_E32): $(MEOW_BIN) tools/pack_e32.py | $(BUILD)
 	python3 tools/pack_e32.py $(MEOW_BIN) $@
 
+$(PYTHON_OBJ): $(APPS_DIR)/python/python.c $(APPS_DIR)/sdk/e32_syscall.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(APP_CFLAGS) -c -o $@ $<
+
+$(PYTHON_ELF): $(CRT0_OBJ) $(PYTHON_OBJ) $(LIBC_OBJS) $(APPS_DIR)/sdk/app.ld | $(BUILD)
+	$(LD) -m elf_i386 -nostdlib -T $(APPS_DIR)/sdk/app.ld -o $@ $(CRT0_OBJ) $(PYTHON_OBJ) $(LIBC_OBJS)
+
+$(PYTHON_BIN): $(PYTHON_ELF) | $(BUILD)
+	$(OBJCOPY) -O binary $(PYTHON_ELF) $@
+
+$(PYTHON_E32): $(PYTHON_BIN) tools/pack_e32.py | $(BUILD)
+	python3 tools/pack_e32.py $(PYTHON_BIN) $(PYTHON_E32)
+
+# Install python into /bin on an already-built disk image (no full rebuild needed).
+# Usage: make install-python
+.PHONY: install-python
+install-python: $(PYTHON_E32)
+	@echo "[INJECTSH] python → /bin"
+	python3 tools/injectsh.py $(DISK_IMG) $(PYTHON_E32) python
+	@echo "[DONE] python installed in /bin — run 'python' or 'python script.py' on the OS"
+
 $(WRITER_INS): $(WRITER_E32) tools/writer_pkg/install.cfg tools/pack_ins.py | $(BUILD)
 	@mkdir -p $(BUILD)/writer_pkg_staging
 	cp tools/writer_pkg/install.cfg $(BUILD)/writer_pkg_staging/install.cfg
@@ -358,7 +383,7 @@ $(WRITER_INS): $(WRITER_E32) tools/writer_pkg/install.cfg tools/pack_ins.py | $(
 # =============================================================================
 # Disk image assembly
 # =============================================================================
-$(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP_E32) $(HELLOC_E32) $(NUMECHO_E32) $(WRITER_E32) $(WRITER_INS) $(GUITEST_E32) $(NEWFEATURES_E32) $(HI_E32) $(MEOW_E32) | $(BUILD)
+$(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP_E32) $(HELLOC_E32) $(NUMECHO_E32) $(WRITER_E32) $(WRITER_INS) $(GUITEST_E32) $(NEWFEATURES_E32) $(HI_E32) $(MEOW_E32) $(PYTHON_E32) | $(BUILD)
 	@echo "[IMG ] Creating disk image"
 	dd if=/dev/zero      of=$@ bs=512 count=131072 status=none
 	dd if=$(STAGE1_BIN)  of=$@ bs=512 seek=0  conv=notrunc status=none
@@ -376,6 +401,7 @@ $(DISK_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SPLASH_RAW) $(HELLO_APP
 	python3 tools/inject_ins.py $@ $(WRITER_INS) WRITER.INS
 	python3 tools/injectsh.py $@ $(HI_E32) hi
 	python3 tools/injectsh.py $@ $(MEOW_E32) meow
+	python3 tools/injectsh.py $@ $(PYTHON_E32) python
 	@echo "[IMG ] Done: $@"
 
 $(BUILD):

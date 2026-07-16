@@ -15,7 +15,8 @@
 #define THEME_CLASSIC  1   // grey taskbar at bottom, teal desktop
 #define THEME_MIDNIGHT 2   // deep navy, silver accents
 #define THEME_SUNSET   3   // warm purple/orange gradient
-#define THEME_COUNT    4
+#define THEME_LUNA     4   // XP-Luna-inspired: glossy blue chrome, green Start pill, Bliss-style sky/hill desktop
+#define THEME_COUNT    5
 
 // ============================================================
 // Runtime color variables — set by apply_theme(), used everywhere
@@ -25,6 +26,8 @@ extern uint32_t COL_DESKTOP;
 extern uint32_t COL_WIN_BG;
 extern uint32_t COL_WIN_TITLE_ACT;
 extern uint32_t COL_WIN_TITLE_INA;
+extern uint32_t COL_WIN_TITLE_ACT2;  // gradient bottom stop (== ACT for flat themes)
+extern uint32_t COL_WIN_TITLE_INA2;  // gradient bottom stop (== INA for flat themes)
 extern uint32_t COL_WIN_TITLE_TXT;
 extern uint32_t COL_BORDER_LIGHT;
 extern uint32_t COL_BORDER_DARK;
@@ -77,8 +80,8 @@ void apply_theme(int theme_id);
 // These change with theme — read g_theme at render time
 // THEME_MODERN:  taskbar at top  (TASKBAR_Y=0, desktop starts at TASKBAR_H)
 // THEME_CLASSIC: taskbar at bottom (TASKBAR_Y=SCREEN_H-TASKBAR_H, desktop starts at 0)
-#define TASKBAR_Y_FOR(t)   ((t)==THEME_CLASSIC ? (SCREEN_H-TASKBAR_H) : 0)
-#define DESKTOP_TOP_FOR(t) ((t)==THEME_CLASSIC ? 0 : TASKBAR_H)
+#define TASKBAR_Y_FOR(t)   (((t)==THEME_CLASSIC||(t)==THEME_LUNA) ? (SCREEN_H-TASKBAR_H) : 0)
+#define DESKTOP_TOP_FOR(t) (((t)==THEME_CLASSIC||(t)==THEME_LUNA) ? 0 : TASKBAR_H)
 
 // ============================================================
 // App enum  (32 apps)

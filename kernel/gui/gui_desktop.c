@@ -119,12 +119,14 @@ static int udb_add(const char *name, const char *pass, const char *hint, uint8_t
 // ============================================================
 // Theme system — runtime color variables
 // ============================================================
-int g_theme = THEME_MODERN;  // default: modern
+int g_theme = THEME_LUNA;  // default: Luna (modern XP-inspired)
 
 uint32_t COL_DESKTOP;
 uint32_t COL_WIN_BG;
 uint32_t COL_WIN_TITLE_ACT;
 uint32_t COL_WIN_TITLE_INA;
+uint32_t COL_WIN_TITLE_ACT2;
+uint32_t COL_WIN_TITLE_INA2;
 uint32_t COL_WIN_TITLE_TXT;
 uint32_t COL_BORDER_LIGHT;
 uint32_t COL_BORDER_DARK;
@@ -149,6 +151,8 @@ void apply_theme(int theme_id) {
         COL_WIN_BG        = RGB(192, 192, 192);
         COL_WIN_TITLE_ACT = RGB(0, 0, 128);       // deep blue
         COL_WIN_TITLE_INA = RGB(128, 128, 128);
+        COL_WIN_TITLE_ACT2 = COL_WIN_TITLE_ACT;   // flat (no gradient) in Classic
+        COL_WIN_TITLE_INA2 = COL_WIN_TITLE_INA;
         COL_WIN_TITLE_TXT = RGB(255, 255, 255);
         COL_BORDER_LIGHT  = RGB(255, 255, 255);
         COL_BORDER_DARK   = RGB(64, 64, 64);
@@ -170,6 +174,8 @@ void apply_theme(int theme_id) {
         COL_WIN_BG        = RGB(18, 22,  54);
         COL_WIN_TITLE_ACT = RGB(60, 80, 160);
         COL_WIN_TITLE_INA = RGB(35, 40,  80);
+        COL_WIN_TITLE_ACT2 = COL_WIN_TITLE_ACT;
+        COL_WIN_TITLE_INA2 = COL_WIN_TITLE_INA;
         COL_WIN_TITLE_TXT = RGB(200, 220, 255);
         COL_BORDER_LIGHT  = RGB(80, 100, 180);
         COL_BORDER_DARK   = RGB(10,  14,  40);
@@ -191,6 +197,8 @@ void apply_theme(int theme_id) {
         COL_WIN_BG        = RGB(40,  18,  35);
         COL_WIN_TITLE_ACT = RGB(200, 80,  40);
         COL_WIN_TITLE_INA = RGB(100, 40,  60);
+        COL_WIN_TITLE_ACT2 = COL_WIN_TITLE_ACT;
+        COL_WIN_TITLE_INA2 = COL_WIN_TITLE_INA;
         COL_WIN_TITLE_TXT = RGB(255, 230, 200);
         COL_BORDER_LIGHT  = RGB(220, 120,  60);
         COL_BORDER_DARK   = RGB(40,  10,  20);
@@ -206,12 +214,38 @@ void apply_theme(int theme_id) {
         COL_MENU_SEL_TXT  = RGB(255, 235, 200);
         COL_MENU_TXT      = RGB(240, 190, 140);
         COL_MENU_DIV      = RGB(100, 40,  40);
+    } else if (theme_id == THEME_LUNA) {
+        // ── Luna: modern take on XP's Luna Blue — glossy gradient chrome,
+        //    silver window face, green Start pill, Bliss-style sky/hill desktop ──
+        COL_DESKTOP       = RGB(93, 156, 214);     // sky blue (used as fallback fill)
+        COL_WIN_BG        = RGB(236, 240, 245);    // silvery-blue window face
+        COL_WIN_TITLE_ACT  = RGB(112, 166, 235);   // gradient top: light glassy blue
+        COL_WIN_TITLE_ACT2 = RGB(30,  87, 191);    // gradient bottom: deep Luna blue
+        COL_WIN_TITLE_INA  = RGB(178, 190, 205);   // inactive: light steel
+        COL_WIN_TITLE_INA2 = RGB(122, 136, 154);   // inactive: darker steel
+        COL_WIN_TITLE_TXT = RGB(255, 255, 255);
+        COL_BORDER_LIGHT  = RGB(255, 255, 255);
+        COL_BORDER_DARK   = RGB(45, 70, 110);
+        COL_BUTTON_FACE   = RGB(225, 230, 236);
+        COL_BUTTON_TXT    = RGB(20, 30, 45);
+        COL_TEXT          = RGB(20, 30, 45);
+        COL_ICON_LABEL    = RGB(255, 255, 255);
+        COL_ICON_SEL_BG   = RGB(49, 106, 197);
+        COL_TASKBAR_BG    = RGB(30, 70, 140);       // fallback flat; taskbar draws its own gradient
+        COL_TASKBAR_TXT   = RGB(255, 255, 255);
+        COL_MENU_BG       = RGB(245, 247, 250);
+        COL_MENU_SEL      = RGB(49, 106, 197);
+        COL_MENU_SEL_TXT  = RGB(255, 255, 255);
+        COL_MENU_TXT      = RGB(20, 30, 45);
+        COL_MENU_DIV      = RGB(190, 198, 208);
     } else {
         // ── Modern: dark panel, blue accent ──
         COL_DESKTOP       = RGB(30, 87, 153);
         COL_WIN_BG        = RGB(236, 236, 236);
         COL_WIN_TITLE_ACT = RGB(50, 120, 200);
         COL_WIN_TITLE_INA = RGB(110, 110, 120);
+        COL_WIN_TITLE_ACT2 = COL_WIN_TITLE_ACT;
+        COL_WIN_TITLE_INA2 = COL_WIN_TITLE_INA;
         COL_WIN_TITLE_TXT = RGB(255, 255, 255);
         COL_BORDER_LIGHT  = RGB(255, 255, 255);
         COL_BORDER_DARK   = RGB(80, 80, 80);
@@ -286,6 +320,35 @@ static void draw_desktop_bg(int32_t desk_top, int32_t desk_h) {
         gui_fill_rect(0, desk_top, SCREEN_W, desk_h, g_wallpaper_colors[g_wallpaper]);
         return;
     }
+    if (g_theme == THEME_LUNA) {
+        // Bliss-style desktop: blue sky gradient + a rolling green hill silhouette
+        for (int32_t row = 0; row < desk_h; row++) {
+            uint32_t t = (uint32_t)row * 255 / (uint32_t)desk_h;
+            uint32_t r2 = 70  + t * 110 / 255; if (r2 > 190) r2 = 190;
+            uint32_t g2 = 130 + t *  95 / 255; if (g2 > 220) g2 = 220;
+            uint32_t b2 = 220 + t *  25 / 255; if (b2 > 250) b2 = 250;
+            gui_draw_hline(0, desk_top + row, SCREEN_W, RGB(r2, g2, b2));
+        }
+        #define HILL_ANCHORS 7
+        static const int32_t hill_pct[HILL_ANCHORS] = {55, 42, 64, 36, 68, 46, 58};
+        int32_t seg_w = SCREEN_W / (HILL_ANCHORS - 1);
+        for (int32_t seg = 0; seg < HILL_ANCHORS - 1; seg++) {
+            int32_t x0 = seg * seg_w;
+            int32_t x1 = (seg == HILL_ANCHORS - 2) ? SCREEN_W : (seg + 1) * seg_w;
+            int32_t h0 = hill_pct[seg], h1 = hill_pct[seg + 1];
+            for (int32_t x = x0; x < x1; x += 4) {
+                int32_t sw = (x + 4 > x1) ? (x1 - x) : 4;
+                int32_t hpct = h0 + (h1 - h0) * (x - x0) / (x1 - x0);
+                int32_t hh = desk_h * hpct / 100;
+                int32_t hy = desk_top + desk_h - hh;
+                int32_t hi = (hh < 10) ? hh : hh / 3;
+                gui_fill_rect(x, hy,      sw, hi,      RGB(90, 190, 90));  // sunlit crest
+                gui_fill_rect(x, hy + hi, sw, hh - hi, RGB(35, 130, 45));  // shaded slope
+            }
+        }
+        return;
+    }
+
     // Gradient — style depends on theme
     for (int32_t row = 0; row < desk_h; row++) {
         uint32_t t = (uint32_t)row * 255 / (uint32_t)desk_h;
@@ -528,6 +591,42 @@ void gui_draw_rect_border(int32_t x, int32_t y, int32_t w, int32_t h,
     gui_draw_vline(x,     y,     h,   tl);
     gui_draw_hline(x,     y+h-1, w,   br);
     gui_draw_vline(x+w-1, y,     h,   br);
+}
+
+// ---- Vertical-gradient fill: interpolates c_top -> c_bot across h rows ----
+static void gui_fill_rect_vgrad(int32_t x, int32_t y, int32_t w, int32_t h,
+                                 uint32_t c_top, uint32_t c_bot) {
+    if (h <= 0 || w <= 0) return;
+    uint32_t tr = (c_top>>16)&0xFF, tg = (c_top>>8)&0xFF, tb = c_top&0xFF;
+    uint32_t brr = (c_bot>>16)&0xFF, bgg = (c_bot>>8)&0xFF, bbb = c_bot&0xFF;
+    for (int32_t row = 0; row < h; row++) {
+        uint32_t t = (h <= 1) ? 0 : (uint32_t)row * 255 / (uint32_t)(h - 1);
+        uint32_t r = (tr*(255-t) + brr*t) / 255;
+        uint32_t g = (tg*(255-t) + bgg*t) / 255;
+        uint32_t b = (tb*(255-t) + bbb*t) / 255;
+        gui_draw_hline(x, y+row, w, RGB(r, g, b));
+    }
+}
+
+// ---- Alpha-blended fill: blends col (with given alpha 0-255) over whatever
+//      is already in the back buffer — used for soft shadows / glossy highlights
+static inline uint32_t blend_argb(uint32_t bg, uint32_t fg, uint8_t alpha) {
+    uint32_t br = (bg>>16)&0xFF, bgc = (bg>>8)&0xFF, bb = bg&0xFF;
+    uint32_t fr = (fg>>16)&0xFF, fgc = (fg>>8)&0xFF, fb = fg&0xFF;
+    uint32_t ia = 255 - alpha;
+    return RGB((fr*alpha + br*ia)/255, (fgc*alpha + bgc*ia)/255, (fb*alpha + bb*ia)/255);
+}
+static void gui_fill_rect_blend(int32_t x, int32_t y, int32_t w, int32_t h,
+                                 uint32_t col, uint8_t alpha) {
+    int32_t x2 = x + w, y2 = y + h;
+    if (x  < 0) x  = 0;
+    if (y  < 0) y  = 0;
+    if (x2 > BB_W) x2 = BB_W;
+    if (y2 > BB_H) y2 = BB_H;
+    for (int32_t row = y; row < y2; row++) {
+        uint32_t *p = g_bb + (uint32_t)row * BB_W + (uint32_t)x;
+        for (int32_t n = x2 - x; n > 0; n--, p++) *p = blend_argb(*p, col, alpha);
+    }
 }
 
 // ============================================================
@@ -1017,6 +1116,10 @@ static void close_window(int32_t idx) {
                 } else if (g_theme == THEME_SUNSET) {
                     _r2=40+_t*120/255; _g2=5+_t*40/255;
                     _b2=(50>_t*40/255)?(50-_t*40/255):5;
+                } else if (g_theme == THEME_LUNA) {
+                    _r2=70+_t*110/255; if(_r2>190)_r2=190;
+                    _g2=130+_t*95/255; if(_g2>220)_g2=220;
+                    _b2=220+_t*25/255; if(_b2>250)_b2=250;
                 } else {
                     _r2=20+_t*10/255; if(_r2>50)_r2=50;
                     _g2=60+_t*30/255; if(_g2>100)_g2=100;
@@ -1045,53 +1148,73 @@ static void close_window(int32_t idx) {
 // ============================================================
 // Window chrome
 // ============================================================
-static void draw_chrome(Window *w, uint8_t active) {
+static void draw_chrome(Window *w, uint8_t active, int32_t mx, int32_t my) {
     int32_t x=w->x, y=w->y, ww=w->w, wh=w->h;
-    // Window shadow
-    gui_fill_rect(x+4, y+4, ww, wh, RGB(0,0,0));
+
+    // Soft drop shadow — two-pass alpha blend fakes a blur instead of a hard
+    // black rectangle (blends with whatever's already painted underneath, so
+    // it composites correctly under other windows / the desktop either way).
+    gui_fill_rect_blend(x+3, y+5, ww, wh, RGB(0,0,0), 35);
+    gui_fill_rect_blend(x+2, y+3, ww, wh, RGB(0,0,0), 22);
+
     // Fill + outer border
     gui_fill_rect(x, y, ww, wh, COL_WIN_BG);
-    gui_draw_rect_border(x, y, ww, wh, RGB(130,130,140), RGB(90,90,100));
-    // Title bar gradient (simple two-tone)
-    uint32_t tc1 = active ? RGB(50,120,200) : RGB(110,110,120);
-    uint32_t tc2 = active ? RGB(30,90,170)  : RGB(90,90,100);
+    gui_draw_rect_border(x, y, ww, wh, COL_BORDER_LIGHT, COL_BORDER_DARK);
+
+    // Title bar — vertical gradient (collapses to flat two-tone on themes
+    // where ACT2/INA2 == ACT/INA, so non-Luna themes are unaffected)
+    uint32_t tc1 = active ? COL_WIN_TITLE_ACT  : COL_WIN_TITLE_INA;
+    uint32_t tc2 = active ? COL_WIN_TITLE_ACT2 : COL_WIN_TITLE_INA2;
     int32_t tbar_w = ww - 2*BORDER_W;
     int32_t tbar_x = x + BORDER_W;
     int32_t tbar_y = y + BORDER_W;
-    for(int32_t row=0; row<TITLE_BAR_H; row++){
-        uint32_t c = (row < TITLE_BAR_H/2) ? tc1 : tc2;
-        gui_draw_hline(tbar_x, tbar_y+row, tbar_w-TITLE_BAR_H-1, c);
-    }
+    int32_t tbar_txt_w = tbar_w - TITLE_BAR_H - 1;
+    gui_fill_rect_vgrad(tbar_x, tbar_y, tbar_txt_w, TITLE_BAR_H, tc1, tc2);
+    // Glossy highlight band across the top third — the "glass" look
+    gui_fill_rect_blend(tbar_x, tbar_y, tbar_txt_w, TITLE_BAR_H/3,
+                         RGB(255,255,255), active ? 45 : 20);
+
     // Title text (clipped to leave room for 3 buttons)
+    uint32_t title_txt = active ? COL_WIN_TITLE_TXT : RGB(230,230,235);
     gui_puts_clip(tbar_x+5, tbar_y+(TITLE_BAR_H-FONT_H)/2,
-                  w->title, RGB(255,255,255), tc1,
+                  w->title, title_txt, tc1,
                   tbar_x+3, tbar_y, tbar_w-3*TITLE_BAR_H-8, TITLE_BAR_H);
-    // Close button [x] — rightmost
+
+    // Close button [x] — rightmost, hover-aware, gradient
     int32_t bx = x+ww-BORDER_W-TITLE_BAR_H;
     int32_t by = y+BORDER_W;
-    gui_fill_rect(bx, by, TITLE_BAR_H, TITLE_BAR_H, RGB(180,50,50));
-    gui_draw_rect_border(bx, by, TITLE_BAR_H, TITLE_BAR_H, RGB(220,80,80), RGB(130,30,30));
-    gui_puts(bx+5, by+(TITLE_BAR_H-FONT_H)/2, "x", RGB(255,255,255), RGB(180,50,50));
+    uint8_t hov_close = pt_in(mx, my, bx, by, TITLE_BAR_H, TITLE_BAR_H);
+    uint32_t close_top = hov_close ? RGB(240,90,80)  : RGB(205,80,75);
+    uint32_t close_bot = hov_close ? RGB(215,20,25)  : RGB(160,45,45);
+    gui_fill_rect_vgrad(bx, by, TITLE_BAR_H, TITLE_BAR_H, close_top, close_bot);
+    gui_draw_rect_border(bx, by, TITLE_BAR_H, TITLE_BAR_H, RGB(230,120,110), RGB(110,25,25));
+    gui_puts(bx+5, by+(TITLE_BAR_H-FONT_H)/2, "x", RGB(255,255,255), close_bot);
+
     // Maximize button [ ] — middle
     int32_t mx2 = bx - TITLE_BAR_H - 1;
     uint8_t is_max = (w->flags & WIN_FLAG_MAXIMIZED) ? 1 : 0;
-    uint32_t max_bg = RGB(80,130,60);
-    gui_fill_rect(mx2, by, TITLE_BAR_H, TITLE_BAR_H, max_bg);
-    gui_draw_rect_border(mx2, by, TITLE_BAR_H, TITLE_BAR_H, RGB(120,180,90), RGB(50,90,40));
+    uint8_t hov_max = pt_in(mx, my, mx2, by, TITLE_BAR_H, TITLE_BAR_H);
+    uint32_t max_top = hov_max ? RGB(140,195,115) : RGB(110,165,90);
+    uint32_t max_bot = hov_max ? RGB(80,140,60)   : RGB(60,110,45);
+    gui_fill_rect_vgrad(mx2, by, TITLE_BAR_H, TITLE_BAR_H, max_top, max_bot);
+    gui_draw_rect_border(mx2, by, TITLE_BAR_H, TITLE_BAR_H, RGB(160,220,130), RGB(40,80,30));
     // Draw a square icon (restore = two overlapping squares, maximize = one square)
     if (is_max) {
-        // restore icon: two small squares offset
         gui_draw_rect_border(mx2+3, by+5, 8, 7, RGB(255,255,255), RGB(255,255,255));
         gui_draw_rect_border(mx2+6, by+3, 8, 7, RGB(255,255,255), RGB(255,255,255));
     } else {
         gui_draw_rect_border(mx2+4, by+4, 10, 10, RGB(255,255,255), RGB(255,255,255));
     }
+
     // Minimize button [_] — leftmost of the three
     int32_t mnx = mx2 - TITLE_BAR_H - 1;
-    uint32_t min_bg = RGB(160,130,40);
-    gui_fill_rect(mnx, by, TITLE_BAR_H, TITLE_BAR_H, min_bg);
-    gui_draw_rect_border(mnx, by, TITLE_BAR_H, TITLE_BAR_H, RGB(210,180,70), RGB(110,90,20));
+    uint8_t hov_min = pt_in(mx, my, mnx, by, TITLE_BAR_H, TITLE_BAR_H);
+    uint32_t min_top = hov_min ? RGB(210,180,100) : RGB(180,150,70);
+    uint32_t min_bot = hov_min ? RGB(160,130,50)  : RGB(130,105,35);
+    gui_fill_rect_vgrad(mnx, by, TITLE_BAR_H, TITLE_BAR_H, min_top, min_bot);
+    gui_draw_rect_border(mnx, by, TITLE_BAR_H, TITLE_BAR_H, RGB(225,200,130), RGB(90,70,20));
     gui_draw_hline(mnx+4, by+TITLE_BAR_H-5, TITLE_BAR_H-8, RGB(255,255,255));
+
     // Client sunken border
     int32_t cax=x+BORDER_W, cay=y+BORDER_W+TITLE_BAR_H+1;
     int32_t caw=ww-2*BORDER_W, cah=wh-(2*BORDER_W+TITLE_BAR_H+1);
@@ -3560,33 +3683,41 @@ static void render_app(Window *w, int32_t mx, int32_t my, uint8_t click, uint8_t
 #define SM_COL_ROWS  18
 #define SM_COL_W     MENU_W
 #define SM_TOT_W     (SM_COL_W*2+4)
-#define SM_H         (SM_COL_ROWS*MENU_ITEM_H+6)
+#define SM_HEADER_H  20
+#define SM_H         (SM_COL_ROWS*MENU_ITEM_H+6+SM_HEADER_H)
 // Position computed at draw time based on g_theme
 
 static void draw_startmenu(int32_t mx, int32_t my) {
-    // Classic: pop UP from bottom bar. Modern: drop DOWN from top panel.
-    int32_t sm_y = (g_theme == THEME_CLASSIC)
+    // Classic/Luna: pop UP from bottom bar. Modern: drop DOWN from top panel.
+    int32_t sm_y = (g_theme == THEME_CLASSIC || g_theme == THEME_LUNA)
                  ? (SCREEN_H - TASKBAR_H - SM_H)
                  : TASKBAR_H;
 
     // Shadow
-    gui_fill_rect(SM_X+4, sm_y+4, SM_TOT_W, SM_H, RGB(0,0,0));
+    gui_fill_rect_blend(SM_X+4, sm_y+4, SM_TOT_W, SM_H, RGB(0,0,0), 45);
     // Menu background
     gui_fill_rect(SM_X, sm_y, SM_TOT_W, SM_H, COL_MENU_BG);
     gui_draw_rect_border(SM_X, sm_y, SM_TOT_W, SM_H, RGB(90,90,90), RGB(30,30,30));
-    // Left accent stripe
-    uint32_t stripe_col = (g_theme == THEME_CLASSIC)  ? RGB(0,0,128)   :
-                          (g_theme == THEME_MIDNIGHT) ? RGB(60,80,160) :
-                          (g_theme == THEME_SUNSET)   ? RGB(200,80,40) :
-                                                        RGB(50,120,200);
-    gui_fill_rect(SM_X, sm_y, 4, SM_H, stripe_col);
+
+    // Header band — glossy blue on Luna, flat accent stripe on others
+    if (g_theme == THEME_LUNA) {
+        gui_fill_rect_vgrad(SM_X+1, sm_y+1, SM_TOT_W-2, SM_HEADER_H, RGB(110,170,235), RGB(35,95,195));
+        gui_fill_rect_blend(SM_X+1, sm_y+1, SM_TOT_W-2, SM_HEADER_H/2, RGB(255,255,255), 40);
+        gui_puts(SM_X+10, sm_y+7, "Eclipse32", COL_WHITE, RGB(60,125,210));
+    } else {
+        uint32_t stripe_col = (g_theme == THEME_CLASSIC)  ? RGB(0,0,128)   :
+                              (g_theme == THEME_MIDNIGHT) ? RGB(60,80,160) :
+                              (g_theme == THEME_SUNSET)   ? RGB(200,80,40) :
+                                                            RGB(50,120,200);
+        gui_fill_rect(SM_X, sm_y, 4, SM_H, stripe_col);
+    }
 
     g_menu_hover = -1;
     for (int32_t i = 0; i < N_MENU_ITEMS; i++) {
         int32_t col = i / SM_COL_ROWS;
         int32_t row = i % SM_COL_ROWS;
         int32_t ix = SM_X + 6 + col * SM_COL_W;
-        int32_t iy = sm_y + 3 + row * MENU_ITEM_H;
+        int32_t iy = sm_y + SM_HEADER_H + 3 + row * MENU_ITEM_H;
 
         if (kstrcmp(g_menu_items[i].label, "---") == 0) {
             gui_draw_hline(ix+2, iy+5, SM_COL_W-6, COL_MENU_DIV);
@@ -3609,25 +3740,52 @@ static void draw_startmenu(int32_t mx, int32_t my) {
 static void draw_taskbar(int32_t mx, int32_t my, uint8_t click) {
     int32_t ty = TASKBAR_Y_FOR(g_theme);  // top or bottom depending on theme
 
-    gui_fill_rect(0, ty, SCREEN_W, TASKBAR_H, COL_TASKBAR_BG);
+    if (g_theme == THEME_LUNA) {
+        // Glossy blue-steel gradient bar with a bright highlight line on top
+        gui_fill_rect_vgrad(0, ty, SCREEN_W, TASKBAR_H, RGB(84,140,215), RGB(22,64,132));
+        gui_draw_hline(0, ty, SCREEN_W, RGB(175,210,245));
+    } else {
+        gui_fill_rect(0, ty, SCREEN_W, TASKBAR_H, COL_TASKBAR_BG);
+    }
 
     if (g_theme == THEME_CLASSIC) {
         // Classic: raised 3D border
         gui_draw_3d_box(0, ty, SCREEN_W, TASKBAR_H, 1);
-    } else {
+    } else if (g_theme != THEME_LUNA) {
         // Modern: thin separator line
         int32_t sep_y = (ty == 0) ? ty + TASKBAR_H - 1 : ty;
         gui_draw_hline(0, sep_y, SCREEN_W, RGB(60,60,60));
     }
 
     // === Applications / Start button ===
-    uint8_t sm_hover = pt_in(mx, my, 2, ty+2, 70, TASKBAR_H-4);
+    int32_t sm_w = (g_theme == THEME_LUNA) ? 78 : 70;
+    uint8_t sm_hover = pt_in(mx, my, 2, ty+2, sm_w, TASKBAR_H-4);
     if (g_theme == THEME_CLASSIC) {
         // Classic: raised Start button
         uint32_t sbg = COL_BUTTON_FACE;
         gui_fill_rect(2, ty+2, 54, TASKBAR_H-4, sbg);
         gui_draw_3d_box(2, ty+2, 54, TASKBAR_H-4, !g_startmenu);
         gui_puts(8, ty+(TASKBAR_H-FONT_H)/2, "Start", COL_BUTTON_TXT, sbg);
+    } else if (g_theme == THEME_LUNA) {
+        // Luna: glossy green Start pill with an original "orbit" mark
+        // (a ring with a single dot -- an Eclipse32 glyph, not a 4-color
+        // flag/tile icon, so it doesn't read as a lookalike of any other
+        // OS's trademarked logo).
+        uint32_t g_top = g_startmenu ? RGB(70,150,60)  : (sm_hover ? RGB(130,215,105) : RGB(100,195,80));
+        uint32_t g_bot = g_startmenu ? RGB(30,90,25)   : (sm_hover ? RGB(55,150,45)   : RGB(35,130,30));
+        gui_fill_rect_vgrad(2, ty+2, sm_w, TASKBAR_H-4, g_top, g_bot);
+        gui_draw_rect_border(2, ty+2, sm_w, TASKBAR_H-4, RGB(190,240,170), RGB(15,60,10));
+        gui_fill_rect_blend(2, ty+2, sm_w, (TASKBAR_H-4)/3, RGB(255,255,255), 50);
+        {
+            int32_t ox = 8, oy = ty+6, osz = 14;
+            gui_draw_rect_border(ox, oy, osz, osz, RGB(255,255,255), RGB(255,255,255));
+            gui_fill_rect(ox+1, oy+1, osz-2, 1, g_bot);
+            gui_fill_rect(ox+1, oy+osz-2, osz-2, 1, g_bot);
+            gui_fill_rect(ox, oy+1, 1, osz-2, g_bot);
+            gui_fill_rect(ox+osz-1, oy+1, 1, osz-2, g_bot);
+            gui_fill_rect(ox+osz-4, oy+2, 3, 3, RGB(255,255,255));
+        }
+        gui_puts(28, ty+(TASKBAR_H-FONT_H)/2, "start", COL_WHITE, g_bot);
     } else {
         // Modern: flat button with "E Eclipse" logo
         uint32_t sbg = g_startmenu ? RGB(70,140,220)
@@ -3641,7 +3799,7 @@ static void draw_taskbar(int32_t mx, int32_t my, uint8_t click) {
     if (click && sm_hover) g_startmenu = !g_startmenu;
 
     // === Window buttons ===
-    int32_t bx = (g_theme == THEME_CLASSIC) ? 60 : 78;
+    int32_t bx = (g_theme == THEME_CLASSIC) ? 60 : (g_theme == THEME_LUNA ? 86 : 78);
     for (int32_t i = 0; i < g_nwins && bx < SCREEN_W - 100; i++) {
         Window *w = &g_wins[i];
         // Show both visible AND minimized windows in taskbar
@@ -3655,6 +3813,14 @@ static void draw_taskbar(int32_t mx, int32_t my, uint8_t click) {
             wbg = minimized ? RGB(180,180,180) : COL_BUTTON_FACE;
             gui_fill_rect(bx, ty+3, bw, TASKBAR_H-6, wbg);
             gui_draw_3d_box(bx, ty+3, bw, TASKBAR_H-6, !active);
+        } else if (g_theme == THEME_LUNA) {
+            uint32_t top = minimized ? RGB(150,165,185)
+                         : (active ? RGB(150,195,240) : (bhover ? RGB(200,215,235) : RGB(170,190,215)));
+            uint32_t bot = minimized ? RGB(105,120,140)
+                         : (active ? RGB(70,130,205)  : (bhover ? RGB(155,175,200) : RGB(120,140,165)));
+            gui_fill_rect_vgrad(bx, ty+3, bw, TASKBAR_H-6, top, bot);
+            gui_draw_rect_border(bx, ty+3, bw, TASKBAR_H-6, RGB(215,230,245), RGB(50,75,110));
+            wbg = bot;
         } else {
             wbg = minimized ? RGB(55,55,70)
                 : (active ? RGB(70,140,220) : (bhover ? RGB(65,65,65) : RGB(50,50,50)));
@@ -3676,6 +3842,7 @@ static void draw_taskbar(int32_t mx, int32_t my, uint8_t click) {
         }
         char tb[14]; kstrncpy(tb, w->title, 13); tb[13]=0;
         uint32_t txt_col = (g_theme == THEME_CLASSIC) ? COL_BUTTON_TXT
+                         : (g_theme == THEME_LUNA) ? (active ? COL_WHITE : RGB(20,30,50))
                          : (active ? COL_WHITE : RGB(200,200,200));
         gui_puts_clip(bx+4, ty+(TASKBAR_H-FONT_H)/2, tb, txt_col, wbg,
                       bx+2, ty+3, bw-4, TASKBAR_H-6);
@@ -3694,6 +3861,10 @@ static void draw_taskbar(int32_t mx, int32_t my, uint8_t click) {
         gui_fill_rect(clk_x, ty+3, 70, TASKBAR_H-6, COL_BUTTON_FACE);
         gui_draw_3d_box(clk_x, ty+3, 70, TASKBAR_H-6, 0);
         gui_puts(clk_x+4, ty+(TASKBAR_H-FONT_H)/2, tc, COL_BUTTON_TXT, COL_BUTTON_FACE);
+    } else if (g_theme == THEME_LUNA) {
+        gui_fill_rect_vgrad(clk_x, ty+3, 70, TASKBAR_H-6, RGB(150,185,225), RGB(90,130,175));
+        gui_draw_rect_border(clk_x, ty+3, 70, TASKBAR_H-6, RGB(210,225,245), RGB(45,75,110));
+        gui_puts(clk_x+4, ty+(TASKBAR_H-FONT_H)/2, tc, RGB(15,25,45), RGB(120,155,200));
     } else {
         gui_fill_rect(clk_x, ty+3, 70, TASKBAR_H-6, RGB(38,38,38));
         gui_draw_rect_border(clk_x, ty+3, 70, TASKBAR_H-6, RGB(60,60,60), RGB(30,30,30));
@@ -3750,7 +3921,7 @@ void gui_run(void) {
     }
 
     // Apply default theme before first frame, then load persisted settings
-    apply_theme(THEME_MODERN);
+    apply_theme(THEME_LUNA);
     settings_load();
 
     // Load user database
@@ -3865,14 +4036,15 @@ void gui_pump(void) {
         if (click) {
             // Close start menu if click outside it
             if (g_startmenu) {
-                int32_t sm_y_rt = (g_theme == THEME_CLASSIC)
+                int32_t sm_y_rt = (g_theme == THEME_CLASSIC || g_theme == THEME_LUNA)
                                 ? (SCREEN_H - TASKBAR_H - SM_H)
                                 : TASKBAR_H;
+                int32_t sm_btn_w = (g_theme == THEME_LUNA) ? 78 : 70;
                 if (g_menu_hover >= 0 && g_menu_items[g_menu_hover].app != APP_NONE) {
                     open_window(g_menu_items[g_menu_hover].app);
                     g_startmenu = 0;
                 } else if (!pt_in(mx,my,SM_X,sm_y_rt,SM_TOT_W,SM_H) &&
-                           !pt_in(mx,my,2,TASKBAR_Y_FOR(g_theme)+2,70,TASKBAR_H-4)) {
+                           !pt_in(mx,my,2,TASKBAR_Y_FOR(g_theme)+2,sm_btn_w,TASKBAR_H-4)) {
                     g_startmenu = 0;
                 }
                 goto after_click;
@@ -4040,7 +4212,7 @@ void gui_pump(void) {
             Window *w=&g_wins[i];
             if(!(w->flags & WIN_FLAG_VISIBLE)) continue;
             uint8_t active=(i==g_front);
-            draw_chrome(w, active);
+            draw_chrome(w, active, mx, my);
             // Only pass click to frontmost window
             render_app(w, mx, my, click && active, active);
         }
