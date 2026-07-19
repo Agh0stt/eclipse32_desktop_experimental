@@ -101,6 +101,7 @@ typedef enum {
     APP_SETTINGS,   /* theme / settings panel */
     APP_SDK,        /* SDK-managed window; userspace app draws its own content */
     APP_USERS,      /* user account manager */
+    APP_BROWSER,    /* simple HTTP/1.0 web browser */
     APP_COUNT
 } AppType;
 
@@ -191,6 +192,18 @@ typedef struct {
     uint8_t  term_in_head;              // circular input buffer write index
     uint8_t  term_in_tail;             // circular input buffer read index
     char     term_inbuf[256];           // keyboard input ring buffer
+    // web browser
+    char     br_url[96];                // address bar contents (also current URL)
+    int32_t  br_url_len;
+    char     br_status[64];             // status line ("Loading...", "OK (1234 bytes)", "Error: ...")
+    uint8_t  br_loading;
+    uint8_t  br_edit_url;               // 1 = address bar has input focus
+    int32_t  br_link_count;
+    int16_t  br_link_line[24];          // rendered-text line index each link sits on
+    char     br_link_href[24][96];      // resolved href for each link
+    char     br_hist[6][96];            // back-history ring (oldest overwritten)
+    int8_t   br_hist_len;
+    int8_t   br_hist_pos;
 } AppState;
 
 // ============================================================

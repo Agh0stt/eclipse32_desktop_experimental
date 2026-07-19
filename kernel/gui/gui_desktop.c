@@ -12,6 +12,9 @@
 #include "../sched/sched.h"
 #include "gui_compat.h"
 #include "../../net/net.h"
+#include "../../net/http.h"
+#include "../drivers/net/rtl8139.h"
+#include "../mm/heap.h"
 #include "../bootmenu/bootmenu.h"
 
 // ============================================================
@@ -883,6 +886,7 @@ static const MenuItem g_menu_items[] = {
     { "Log Viewer",     APP_LOGVIEWER   },
     { "Network Info",   APP_NETINFO     },
     { "IP Config",      APP_IPCONFIG    },
+    { "Web Browser",    APP_BROWSER     },
     { "Help",           APP_HELP        },
     { "Settings",       APP_SETTINGS    },
     { "Users",          APP_USERS       },
@@ -1066,6 +1070,21 @@ static int32_t open_window(AppType app) {
             "  Games, tools, utilities\n");
         w->st.text_len=(int32_t)kstrlen(w->st.text); break;
     case APP_ABOUT:       kstrcpy(w->title,"About Eclipse32"); w->w=300;w->h=220; break;
+    case APP_BROWSER:     kstrcpy(w->title,"Web Browser");   w->w=680;w->h=460;
+        kstrcpy(w->st.br_url,"http://");
+        w->st.br_url_len=(int32_t)kstrlen(w->st.br_url);
+        kstrcpy(w->st.br_status,"Ready. HTTP/1.0 only (no HTTPS).");
+        kstrcpy(w->st.text,
+            "Eclipse Browser\n\n"
+            "Type a URL in the address bar above and press Enter,\n"
+            "or click Go. Only plain http:// URLs are supported —\n"
+            "there is no TLS, so https:// pages cannot be loaded.\n\n"
+            "Links found on a loaded page appear as numbered\n"
+            "[N] lines below the page text — click one to follow it.\n");
+        w->st.text_len=(int32_t)kstrlen(w->st.text);
+        w->st.br_link_count=0;
+        w->st.br_hist_len=0; w->st.br_hist_pos=0;
+        break;
     case APP_SETTINGS:    kstrcpy(w->title,"Settings");        w->w=380;w->h=560; break;
     case APP_USERS:       kstrcpy(w->title,"User Accounts");   w->w=320;w->h=480; break;
     default:              kstrcpy(w->title,"Window");        w->w=320;w->h=240; break;
@@ -1986,6 +2005,363 @@ static void render_ipconfig(Window *w, int32_t mx, int32_t my, uint8_t click){
     gui_puts(cx+6,ty,"lo0  127.0.0.1  UP LOOPBACK",COL_TEXT,COL_WIN_BG); ty+=FONT_H+4;
     gui_puts(cx+6,ty,"eth0 (not present)",RGB(128,128,128),COL_WIN_BG); ty+=FONT_H+4;
     (void)ch;
+}
+
+// ============================================================
+// Web Browser — HTTP/1.0-only, renders HTML as wrapped plain text
+// with numbered, clickable links.
+// ============================================================
+#define BR_WRAP_COL   78     // characters per line before soft-wrapping
+#define BR_MAX_LINKS  24
+
+static int br_ci_match(const char *s, int n, const char *lower_word) {
+    // case-insensitive compare of s[0..n) against a lowercase literal
+    for (int i = 0; i < n; i++) {
+        if (!lower_word[i]) return 0;
+        char c = s[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != lower_word[i]) return 0;
+    }
+    return lower_word[n] == '\0';
+}
+
+// Find attr="value" (or attr='value') inside a tag's inner text (between < and >).
+// Copies the value (unescaped minimally) into out, returns 1 if found.
+static int br_find_attr(const char *tag, int taglen, const char *attr, char *out, int outmax) {
+    int alen = (int)kstrlen(attr);
+    for (int i = 0; i + alen < taglen; i++) {
+        int match = 1;
+        for (int j = 0; j < alen; j++) {
+            char c = tag[i+j];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != attr[j]) { match = 0; break; }
+        }
+        if (!match) continue;
+        int k = i + alen;
+        while (k < taglen && (tag[k] == ' ' || tag[k] == '\t')) k++;
+        if (k >= taglen || tag[k] != '=') continue;
+        k++;
+        while (k < taglen && (tag[k] == ' ' || tag[k] == '\t')) k++;
+        if (k >= taglen) continue;
+        char quote = 0;
+        if (tag[k] == '"' || tag[k] == '\'') { quote = tag[k]; k++; }
+        int o = 0;
+        while (k < taglen && o < outmax-1) {
+            char c = tag[k];
+            if (quote) { if (c == quote) break; }
+            else { if (c == ' ' || c == '\t' || c == '>') break; }
+            out[o++] = c;
+            k++;
+        }
+        out[o] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+// Append src to dst (which already contains a NUL-terminated string), never
+// writing past dst[dstsize-1]. dst is always left NUL-terminated.
+static void br_append(char *dst, int dstsize, const char *src) {
+    int l = (int)kstrlen(dst);
+    if (l >= dstsize-1) return;
+    kstrncpy(dst+l, src, (size_t)(dstsize-1-l));
+    dst[dstsize-1] = 0;
+}
+
+// Resolve a possibly-relative href against the currently loaded base URL.
+static void br_resolve_url(const char *base, const char *href, char *out, int outmax) {
+    if (kstrncmp(href, "http://", 7) == 0 || kstrncmp(href, "https://", 8) == 0) {
+        kstrncpy(out, href, (size_t)outmax-1); out[outmax-1] = 0; return;
+    }
+    if (href[0] == '/' && href[1] == '/') {
+        kstrcpy(out, "http:");
+        br_append(out, outmax, href);
+        return;
+    }
+    // Find the end of "scheme://host" (i.e. the 3rd '/' in the URL).
+    int slashes = 0, host_end = 0;
+    for (int i = 0; base[i]; i++) {
+        if (base[i] == '/') { slashes++; if (slashes == 3) { host_end = i; break; } }
+    }
+    if (!host_end) host_end = (int)kstrlen(base);
+
+    if (href[0] == '/') {
+        int n = host_end; if (n > outmax-1) n = outmax-1;
+        kmemcpy(out, base, (size_t)n); out[n] = 0;
+        br_append(out, outmax, href);
+        return;
+    }
+    // Relative to the current directory: base up to (and including) the last '/'.
+    int cut = (int)kstrlen(base);
+    for (int i = (int)kstrlen(base)-1; i > host_end; i--) {
+        if (base[i] == '/') { cut = i+1; break; }
+    }
+    if (cut > outmax-1) cut = outmax-1;
+    kmemcpy(out, base, (size_t)cut); out[cut] = 0;
+    br_append(out, outmax, href);
+}
+
+// Convert an HTML byte buffer into wrapped plain text, collecting a numbered
+// link list as it goes. Very small: no nesting stack, tag names matched
+// case-insensitively, entities decoded, <script>/<style> bodies skipped.
+static void br_html_to_text(const char *html, uint32_t html_len,
+                             char *out, int32_t *out_len, int32_t max_out,
+                             int16_t *link_line, char link_href[][96], int32_t *link_count,
+                             const char *base_url) {
+    int32_t o = 0;          // write cursor into out[]
+    int32_t line = 0;       // current rendered line number
+    int32_t col  = 0;       // current column on that line
+    int lc = 0;              // link count so far
+    uint8_t skip_mode = 0;   // 1 = inside <script> or <style>, drop text
+    uint8_t in_anchor = 0;
+    char pending_href[96]; pending_href[0]=0;
+    uint8_t last_was_space = 1; // collapse leading/consecutive whitespace
+
+    #define BR_PUT(ch) do{ if(o<max_out-1){ out[o++]=(char)(ch); \
+        if((ch)=='\n'){line++;col=0;} else col++; } }while(0)
+    #define BR_NEWLINE() do{ if(col!=0) BR_PUT('\n'); }while(0)
+
+    uint32_t i = 0;
+    while (i < html_len) {
+        char c = html[i];
+        if (c == '<') {
+            // find end of tag
+            uint32_t j = i+1;
+            while (j < html_len && html[j] != '>') j++;
+            const char *tag = &html[i+1];
+            int taglen = (int)(j>i ? j-i-1 : 0);
+            uint8_t closing = (taglen>0 && tag[0]=='/');
+            const char *name = closing ? tag+1 : tag;
+            int namelen = 0;
+            while (namelen < taglen-(closing?1:0) &&
+                   ((name[namelen]>='a'&&name[namelen]<='z')||
+                    (name[namelen]>='A'&&name[namelen]<='Z')||
+                    (name[namelen]>='0'&&name[namelen]<='9')))
+                namelen++;
+
+            if (!closing && br_ci_match(name,namelen,"script"))      skip_mode = 1;
+            else if (!closing && br_ci_match(name,namelen,"style"))  skip_mode = 1;
+            else if (closing && br_ci_match(name,namelen,"script"))  skip_mode = 0;
+            else if (closing && br_ci_match(name,namelen,"style"))   skip_mode = 0;
+            else if (!skip_mode) {
+                if (!closing && br_ci_match(name,namelen,"a")) {
+                    char href[96];
+                    if (lc < BR_MAX_LINKS && br_find_attr(tag,taglen,"href",href,sizeof(href))) {
+                        BR_NEWLINE();
+                        char num[8]; kitoa(lc+1,num,10);
+                        BR_PUT('['); for(char*p=num;*p;p++) BR_PUT(*p); BR_PUT(']'); BR_PUT(' ');
+                        link_line[lc] = (int16_t)line;
+                        br_resolve_url(base_url, href, link_href[lc], 96);
+                        lc++;
+                        in_anchor = 1;
+                        last_was_space = 1;
+                    }
+                } else if (closing && br_ci_match(name,namelen,"a")) {
+                    in_anchor = 0;
+                    last_was_space = 1;
+                } else if (!closing && (br_ci_match(name,namelen,"br"))) {
+                    BR_PUT('\n'); last_was_space = 1;
+                } else if (!closing && (br_ci_match(name,namelen,"p")||br_ci_match(name,namelen,"div")||
+                           br_ci_match(name,namelen,"h1")||br_ci_match(name,namelen,"h2")||
+                           br_ci_match(name,namelen,"h3")||br_ci_match(name,namelen,"h4")||
+                           br_ci_match(name,namelen,"h5")||br_ci_match(name,namelen,"h6")||
+                           br_ci_match(name,namelen,"li")||br_ci_match(name,namelen,"tr"))) {
+                    BR_NEWLINE(); if (o<max_out-1 && line>0) BR_PUT('\n');
+                    last_was_space = 1;
+                } else if (closing && (br_ci_match(name,namelen,"p")||br_ci_match(name,namelen,"div")||
+                           br_ci_match(name,namelen,"h1")||br_ci_match(name,namelen,"h2")||
+                           br_ci_match(name,namelen,"h3")||br_ci_match(name,namelen,"h4")||
+                           br_ci_match(name,namelen,"h5")||br_ci_match(name,namelen,"h6")||
+                           br_ci_match(name,namelen,"li")||br_ci_match(name,namelen,"tr"))) {
+                    BR_NEWLINE(); last_was_space = 1;
+                }
+            }
+            i = j+1;
+            continue;
+        }
+        if (skip_mode) { i++; continue; }
+
+        if (c == '&') {
+            // entity decode
+            if (kstrncmp(&html[i],"&amp;",5)==0)  { BR_PUT('&'); i+=5; last_was_space=0; continue; }
+            if (kstrncmp(&html[i],"&lt;",4)==0)   { BR_PUT('<'); i+=4; last_was_space=0; continue; }
+            if (kstrncmp(&html[i],"&gt;",4)==0)   { BR_PUT('>'); i+=4; last_was_space=0; continue; }
+            if (kstrncmp(&html[i],"&quot;",6)==0) { BR_PUT('"'); i+=6; last_was_space=0; continue; }
+            if (kstrncmp(&html[i],"&#39;",5)==0)  { BR_PUT('\''); i+=5; last_was_space=0; continue; }
+            if (kstrncmp(&html[i],"&apos;",6)==0) { BR_PUT('\''); i+=6; last_was_space=0; continue; }
+            if (kstrncmp(&html[i],"&nbsp;",6)==0) { BR_PUT(' '); i+=6; last_was_space=1; continue; }
+        }
+        if (c=='\r') { i++; continue; }
+        if (c==' '||c=='\t'||c=='\n') {
+            if (!last_was_space) { BR_PUT(' '); last_was_space = 1; }
+            i++; continue;
+        }
+        BR_PUT(c);
+        last_was_space = 0;
+        if (col >= BR_WRAP_COL) BR_PUT('\n');
+        i++;
+        (void)in_anchor;
+    }
+    out[o<max_out?o:max_out-1] = '\0';
+    *out_len = o;
+    *link_count = lc;
+    #undef BR_PUT
+    #undef BR_NEWLINE
+}
+
+static void br_set_status(Window *w, const char *msg) {
+    kstrncpy(w->st.br_status, msg, sizeof(w->st.br_status)-1);
+    w->st.br_status[sizeof(w->st.br_status)-1] = 0;
+}
+
+static void br_navigate(Window *w, const char *raw_url, uint8_t push_history) {
+    char url[96];
+    kstrncpy(url, raw_url, sizeof(url)-1); url[sizeof(url)-1] = 0;
+    if (kstrncmp(url,"http://",7)!=0 && kstrncmp(url,"https://",8)!=0) {
+        char tmp[96]; kstrcpy(tmp,"http://");
+        br_append(tmp, sizeof(tmp), url);
+        kstrncpy(url, tmp, sizeof(url)-1); url[sizeof(url)-1] = 0;
+    }
+    if (kstrncmp(url,"https://",8)==0) {
+        br_set_status(w, "Error: HTTPS is not supported (no TLS in Eclipse32)");
+        kstrncpy(w->st.br_url, url, sizeof(w->st.br_url)-1);
+        w->st.br_url_len = (int32_t)kstrlen(w->st.br_url);
+        return;
+    }
+    if (!rtl8139_present()) {
+        br_set_status(w, "Error: no network interface");
+        return;
+    }
+    kstrncpy(w->st.br_url, url, sizeof(w->st.br_url)-1);
+    w->st.br_url[sizeof(w->st.br_url)-1] = 0;
+    w->st.br_url_len = (int32_t)kstrlen(w->st.br_url);
+    br_set_status(w, "Loading...");
+    w->st.br_loading = 1;
+
+    uint32_t len = 0;
+    uint8_t *body = http_get(url, &len);
+    w->st.br_loading = 0;
+    if (!body) {
+        br_set_status(w, "Error: could not load page (DNS/connect/timeout)");
+        w->st.text_len = 0; w->st.text[0]=0;
+        w->st.br_link_count = 0;
+        return;
+    }
+
+    br_html_to_text((const char*)body, len, w->st.text, &w->st.text_len, WIN_TEXT_BUF,
+                     w->st.br_link_line, w->st.br_link_href, &w->st.br_link_count, url);
+    kfree(body);
+    w->st.scroll_y = 0;
+
+    char msg[64]; kstrcpy(msg,"OK ("); char nb[16]; kutoa(len,nb,10);
+    kstrcat(msg,nb); kstrcat(msg," bytes)");
+    br_set_status(w, msg);
+
+    if (push_history) {
+        if (w->st.br_hist_len < 6) {
+            kstrncpy(w->st.br_hist[w->st.br_hist_len], url, 95);
+            w->st.br_hist_len++;
+            w->st.br_hist_pos = w->st.br_hist_len-1;
+        } else {
+            for (int k=0;k<5;k++) kstrncpy(w->st.br_hist[k], w->st.br_hist[k+1], 95);
+            kstrncpy(w->st.br_hist[5], url, 95);
+            w->st.br_hist_pos = 5;
+        }
+    }
+}
+
+static void render_browser(Window *w, int32_t mx, int32_t my, uint8_t click) {
+    int32_t cx=win_ca_x(w),cy=win_ca_y(w),cw=win_ca_w(w),ch=win_ca_h(w);
+    AppState *st = &w->st;
+
+    // --- Toolbar: Back | address field | Go ---
+    int32_t tb_h = 20;
+    gui_fill_rect(cx,cy,cw,tb_h,RGB(225,225,232));
+    gui_draw_hline(cx,cy+tb_h-1,cw,RGB(170,170,180));
+
+    int32_t back_w = 40, go_w = 32;
+    if (gui_button(cx+2,cy+2,back_w,tb_h-4,"Back",mx,my,click)) {
+        if (st->br_hist_pos > 0) {
+            st->br_hist_pos--;
+            br_navigate(w, st->br_hist[st->br_hist_pos], 0);
+        }
+    }
+
+    int32_t addr_x = cx+back_w+6, addr_w = cw-back_w-go_w-12;
+    uint8_t addr_hover_click = click && mx>=addr_x && mx<addr_x+addr_w && my>=cy+2 && my<cy+tb_h-2;
+    if (addr_hover_click) st->br_edit_url = 1;
+    else if (click) st->br_edit_url = 0;
+
+    gui_fill_rect(addr_x,cy+2,addr_w,tb_h-4,RGB(255,255,255));
+    gui_draw_rect_border(addr_x,cy+2,addr_w,tb_h-4,RGB(140,140,150),RGB(210,210,220));
+    gui_puts_clip(addr_x+3,cy+2+(tb_h-4-FONT_H)/2, st->br_url, COL_TEXT, RGB(255,255,255),
+                  addr_x+2,cy+2,addr_w-4,tb_h-4);
+    if (st->br_edit_url && (get_ticks()/50)%2==0) {
+        int32_t cxp = addr_x+3+(int32_t)kstrlen(st->br_url)*FONT_W;
+        gui_fill_rect(cxp,cy+3,2,tb_h-6,RGB(50,100,200));
+    }
+
+    if (gui_button(cx+cw-go_w-2,cy+2,go_w,tb_h-4,"Go",mx,my,click)) {
+        br_navigate(w, st->br_url, 1);
+        st->br_edit_url = 0;
+    }
+
+    if (st->br_edit_url) {
+        char kc = kb_getchar_nowait();
+        if (kc) {
+            if (kc=='\n') {
+                br_navigate(w, st->br_url, 1);
+                st->br_edit_url = 0;
+            } else if (kc=='\b') {
+                if (st->br_url_len>0) { st->br_url_len--; st->br_url[st->br_url_len]=0; }
+            } else if (st->br_url_len < (int32_t)sizeof(st->br_url)-2) {
+                st->br_url[st->br_url_len++]=kc; st->br_url[st->br_url_len]=0;
+            }
+        }
+    }
+
+    // --- Status bar ---
+    int32_t status_y = cy+tb_h;
+    int32_t status_h = FONT_H+6;
+    uint32_t status_col = st->br_loading ? RGB(140,110,20) :
+        (kstrncmp(st->br_status,"Error",5)==0 ? RGB(160,20,20) : RGB(20,110,40));
+    gui_fill_rect(cx,status_y,cw,status_h,RGB(240,240,244));
+    gui_puts(cx+4,status_y+3,st->br_status,status_col,RGB(240,240,244));
+    gui_draw_hline(cx,status_y+status_h-1,cw,RGB(200,200,210));
+
+    // --- Content area ---
+    int32_t content_y = status_y+status_h;
+    int32_t content_h = ch-tb_h-status_h;
+    gui_fill_rect(cx,content_y,cw,content_h,RGB(255,255,255));
+    gui_draw_rect_border(cx,content_y,cw,content_h,RGB(150,150,160),RGB(200,200,210));
+
+    const char *p = st->text;
+    int32_t tx = cx+4, ty = content_y+3-st->scroll_y;
+    int32_t lx = cx+4;
+    int32_t cur_line = 0;
+    int32_t line_start_y = ty;
+    while (*p) {
+        // does this line have a link?
+        uint8_t is_link_line = 0;
+        for (int32_t k=0;k<st->br_link_count;k++)
+            if (st->br_link_line[k]==cur_line) { is_link_line = 1; break; }
+        uint32_t fg = is_link_line ? RGB(20,80,200) : COL_TEXT;
+
+        if (*p=='\n') {
+            if (is_link_line && click && mx>=cx && mx<cx+cw &&
+                my>=line_start_y && my<line_start_y+FONT_H+1) {
+                for (int32_t k=0;k<st->br_link_count;k++)
+                    if (st->br_link_line[k]==cur_line) { br_navigate(w, st->br_link_href[k], 1); break; }
+            }
+            tx=lx; cur_line++; ty+=FONT_H+1; line_start_y=ty;
+        } else {
+            if (ty>=content_y-FONT_H && ty<content_y+content_h && tx<cx+cw)
+                gui_putc(tx,ty,*p,fg,RGB(255,255,255));
+            tx+=FONT_W;
+        }
+        p++;
+    }
+    (void)mx; (void)my;
 }
 
 // --- Paint (simple pixel canvas) ---
@@ -3644,6 +4020,7 @@ static void render_app(Window *w, int32_t mx, int32_t my, uint8_t click, uint8_t
     case APP_HEXVIEW:     render_hexview(w,mx,my,click);    break;
     case APP_NETINFO:     render_netinfo(w,mx,my,click);    break;
     case APP_IPCONFIG:    render_ipconfig(w,mx,my,click);   break;
+    case APP_BROWSER:     render_browser(w,mx,my,click);    break;
     case APP_PAINT:       render_paint(w,mx,my,click);      break;
     case APP_COLORPICKER: render_colorpicker(w,mx,my,click);break;
     case APP_SCREENSAVER: render_screensaver(w,mx,my,click);break;
