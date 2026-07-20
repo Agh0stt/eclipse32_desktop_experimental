@@ -5,11 +5,11 @@ BITS 16
 ORG 0x8000
 
 %define KERNEL_LBA_START  17
-%define KERNEL_SECTORS    484
+%define KERNEL_SECTORS    500
 %define MMAP_ADDR         0x500
 %define BOOT_INFO_ADDR    0x600
 %define VBE_INFO_ADDR     0x7000
-%define SPLASH_LBA_START  550
+%define SPLASH_LBA_START  600
 %define SPLASH_SECTORS    4608
 %define SPLASH_CHUNK_SECT 64
 %define SPLASH_SCRATCH_SEG 0x5000   ; scratch buffer at 0x50000 (segment form)
@@ -156,7 +156,7 @@ load_kernel:
 
     mov dword [dap.lba_lo], KERNEL_LBA_START + 381
     mov dword [dap.lba_hi], 0
-    mov word  [dap.count],  103
+    mov word  [dap.count],  119
     mov word  [dap.off],    0x1A00
     mov word  [dap.seg],    0x3E00
     mov si, dap

@@ -204,6 +204,12 @@ typedef struct {
     char     br_hist[6][96];            // back-history ring (oldest overwritten)
     int8_t   br_hist_len;
     int8_t   br_hist_pos;
+    // per-character style word, parallel to text[] (only meaningful for APP_BROWSER):
+    // bits 0-3  = fg palette color index (0 = default text color)
+    // bits 4-7  = bg palette color index (0 = no background override)
+    // bit 8=bold, bit 9=italic, bit 10=underline, bit 11=strikethrough
+    // See BR_STY_* in gui_desktop.c.
+    uint16_t br_style[WIN_TEXT_BUF];
 } AppState;
 
 // ============================================================

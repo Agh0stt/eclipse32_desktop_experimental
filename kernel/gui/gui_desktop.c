@@ -2013,6 +2013,45 @@ static void render_ipconfig(Window *w, int32_t mx, int32_t my, uint8_t click){
 // ============================================================
 #define BR_WRAP_COL   78     // characters per line before soft-wrapping
 #define BR_MAX_LINKS  24
+#define BR_TBL_COL_W  12     // fixed column width for <td>/<th> (simple streaming table layout)
+
+// --- per-character style word (see AppState.br_style) ---
+#define BR_STY_FG_MASK  0x000F
+#define BR_STY_BG_SHIFT 4
+#define BR_STY_BG_MASK  (0x000F << BR_STY_BG_SHIFT)
+#define BR_STY_BOLD     (1<<8)
+#define BR_STY_ITALIC   (1<<9)
+#define BR_STY_UNDER    (1<<10)
+#define BR_STY_STRIKE   (1<<11)
+
+// Small fixed palette. Index 0 = "default" (falls back to COL_TEXT at render time).
+static const uint32_t br_palette_rgb[16] = {
+    0,                        // 0  default
+    RGB(0,0,0),               // 1  black
+    RGB(255,255,255),         // 2  white
+    RGB(200,0,0),             // 3  red
+    RGB(0,150,0),             // 4  green
+    RGB(30,80,220),           // 5  blue
+    RGB(200,180,0),           // 6  yellow
+    RGB(230,120,0),           // 7  orange
+    RGB(130,0,160),           // 8  purple
+    RGB(120,120,120),         // 9  gray
+    RGB(0,150,150),           // 10 cyan/teal
+    RGB(220,80,150),          // 11 pink/magenta
+    RGB(120,70,20),           // 12 brown
+    RGB(140,0,0),             // 13 dark red/maroon
+    RGB(0,0,120),             // 14 navy
+    RGB(190,190,190),         // 15 light gray/silver
+};
+
+typedef struct { const char *name; uint8_t idx; } BrNamedColor;
+static const BrNamedColor br_named_colors[] = {
+    {"black",1},{"white",2},{"red",3},{"green",4},{"blue",5},
+    {"yellow",6},{"orange",7},{"purple",8},{"gray",9},{"grey",9},
+    {"cyan",10},{"teal",10},{"pink",11},{"magenta",11},{"brown",12},
+    {"darkred",13},{"maroon",13},{"navy",14},{"silver",15},
+    {"lightgray",15},{"lightgrey",15},{"lime",4},{"olive",6},
+};
 
 static int br_ci_match(const char *s, int n, const char *lower_word) {
     // case-insensitive compare of s[0..n) against a lowercase literal
@@ -2059,6 +2098,77 @@ static int br_find_attr(const char *tag, int taglen, const char *attr, char *out
     return 0;
 }
 
+static int br_hexnib(char c) {
+    if (c>='0'&&c<='9') return c-'0';
+    if (c>='a'&&c<='f') return c-'a'+10;
+    if (c>='A'&&c<='F') return c-'A'+10;
+    return 0;
+}
+
+// Parse a CSS-ish color value ("red", "#f00", "#ff0000") into a palette index.
+// Hex values are snapped to the nearest palette entry by RGB distance.
+static uint8_t br_parse_color(const char *val, int vlen) {
+    if (vlen <= 0) return 0;
+    if (val[0] == '#') {
+        int r,g,b;
+        if (vlen == 4) {
+            r = br_hexnib(val[1])*17; g = br_hexnib(val[2])*17; b = br_hexnib(val[3])*17;
+        } else if (vlen >= 7) {
+            r = br_hexnib(val[1])*16+br_hexnib(val[2]);
+            g = br_hexnib(val[3])*16+br_hexnib(val[4]);
+            b = br_hexnib(val[5])*16+br_hexnib(val[6]);
+        } else return 0;
+        int best = 1, bestd = 1<<30;
+        for (int k=1; k<16; k++) {
+            uint32_t c = br_palette_rgb[k];
+            int pr=(int)((c>>16)&0xFF), pg=(int)((c>>8)&0xFF), pb=(int)(c&0xFF);
+            int dr=r-pr, dg=g-pg, db=b-pb;
+            int d = dr*dr+dg*dg+db*db;
+            if (d < bestd) { bestd = d; best = k; }
+        }
+        return (uint8_t)best;
+    }
+    for (unsigned k=0; k<sizeof(br_named_colors)/sizeof(br_named_colors[0]); k++) {
+        if (br_ci_match(val, vlen, br_named_colors[k].name)) return br_named_colors[k].idx;
+    }
+    return 0;
+}
+
+// Look for "<prop>: <value>" inside a style="..." attribute value (property
+// name must sit at a boundary: start of string, after ';', or after ' ').
+// Returns 1 and fills out[] if found.
+static int br_style_find_prop(const char *style, int slen, const char *prop, char *out, int outmax) {
+    int plen = (int)kstrlen(prop);
+    for (int i=0; i+plen<=slen; i++) {
+        if (!br_ci_match(&style[i], plen, prop)) continue;
+        if (i>0) {
+            char prev = style[i-1];
+            if (prev!=';' && prev!=' ') continue; // not a standalone property name
+        }
+        int k = i+plen;
+        while (k<slen && style[k]==' ') k++;
+        if (k>=slen || style[k]!=':') continue;
+        k++;
+        while (k<slen && style[k]==' ') k++;
+        int o = 0;
+        while (k<slen && style[k]!=';' && o<outmax-1) out[o++]=style[k++];
+        while (o>0 && out[o-1]==' ') o--;
+        out[o]=0;
+        return 1;
+    }
+    return 0;
+}
+
+static int br_extract_style_color(const char *style, int slen, char *out, int outmax) {
+    return br_style_find_prop(style, slen, "color", out, outmax);
+}
+
+static int br_extract_style_bg(const char *style, int slen, char *out, int outmax) {
+    if (br_style_find_prop(style, slen, "background-color", out, outmax)) return 1;
+    return br_style_find_prop(style, slen, "background", out, outmax);
+}
+
+
 // Append src to dst (which already contains a NUL-terminated string), never
 // writing past dst[dstsize-1]. dst is always left NUL-terminated.
 static void br_append(char *dst, int dstsize, const char *src) {
@@ -2102,13 +2212,19 @@ static void br_resolve_url(const char *base, const char *href, char *out, int ou
 }
 
 // Convert an HTML byte buffer into wrapped plain text, collecting a numbered
-// link list as it goes. Very small: no nesting stack, tag names matched
-// case-insensitively, entities decoded, <script>/<style> bodies skipped.
+// link list and a parallel per-character style buffer as it goes. Very
+// small: no generic nesting stack, tag names matched case-insensitively,
+// entities decoded, <script>/<style> bodies skipped. Bold/italic/underline/
+// strike are tracked as depth counters (so <b>x<b>y</b>z</b> degrades
+// gracefully); fg/bg color are tracked with small stacks scoped to
+// <font>/<span>/<td>/<th>/<mark>. Tables are laid out as a simple streaming
+// grid: every <td>/<th> is padded/truncated to a fixed column width, so
+// columns stay aligned without needing to know the table shape up front.
 static void br_html_to_text(const char *html, uint32_t html_len,
-                             char *out, int32_t *out_len, int32_t max_out,
+                             char *out, uint16_t *style, int32_t *out_len, int32_t max_out,
                              int16_t *link_line, char link_href[][96], int32_t *link_count,
                              const char *base_url) {
-    int32_t o = 0;          // write cursor into out[]
+    int32_t o = 0;          // write cursor into out[]/style[]
     int32_t line = 0;       // current rendered line number
     int32_t col  = 0;       // current column on that line
     int lc = 0;              // link count so far
@@ -2117,7 +2233,17 @@ static void br_html_to_text(const char *html, uint32_t html_len,
     char pending_href[96]; pending_href[0]=0;
     uint8_t last_was_space = 1; // collapse leading/consecutive whitespace
 
-    #define BR_PUT(ch) do{ if(o<max_out-1){ out[o++]=(char)(ch); \
+    uint8_t bold_depth=0, italic_depth=0, under_depth=0, strike_depth=0;
+    uint8_t current_color = 0, current_bg = 0;
+    uint8_t color_stack[8]; uint8_t color_sp = 0;
+    uint8_t bg_stack[8];    uint8_t bg_sp = 0;
+    int32_t td_col_start = 0; // col at which the current <td>/<th> content began
+
+    #define BR_CUR_STYLE() ((uint16_t)( (current_color & BR_STY_FG_MASK) \
+        | ((uint16_t)(current_bg & 0x0F) << BR_STY_BG_SHIFT) \
+        | (bold_depth?BR_STY_BOLD:0) | (italic_depth?BR_STY_ITALIC:0) \
+        | (under_depth?BR_STY_UNDER:0) | (strike_depth?BR_STY_STRIKE:0) ))
+    #define BR_PUT(ch) do{ if(o<max_out-1){ out[o]=(char)(ch); style[o]=BR_CUR_STYLE(); o++; \
         if((ch)=='\n'){line++;col=0;} else col++; } }while(0)
     #define BR_NEWLINE() do{ if(col!=0) BR_PUT('\n'); }while(0)
 
@@ -2138,6 +2264,13 @@ static void br_html_to_text(const char *html, uint32_t html_len,
                     (name[namelen]>='A'&&name[namelen]<='Z')||
                     (name[namelen]>='0'&&name[namelen]<='9')))
                 namelen++;
+
+            uint8_t is_heading = br_ci_match(name,namelen,"h1")||br_ci_match(name,namelen,"h2")||
+                                  br_ci_match(name,namelen,"h3")||br_ci_match(name,namelen,"h4")||
+                                  br_ci_match(name,namelen,"h5")||br_ci_match(name,namelen,"h6");
+            uint8_t is_block = is_heading || br_ci_match(name,namelen,"p")||br_ci_match(name,namelen,"div")||
+                                br_ci_match(name,namelen,"li");
+            uint8_t is_cell = br_ci_match(name,namelen,"td")||br_ci_match(name,namelen,"th");
 
             if (!closing && br_ci_match(name,namelen,"script"))      skip_mode = 1;
             else if (!closing && br_ci_match(name,namelen,"style"))  skip_mode = 1;
@@ -2161,19 +2294,100 @@ static void br_html_to_text(const char *html, uint32_t html_len,
                     last_was_space = 1;
                 } else if (!closing && (br_ci_match(name,namelen,"br"))) {
                     BR_PUT('\n'); last_was_space = 1;
-                } else if (!closing && (br_ci_match(name,namelen,"p")||br_ci_match(name,namelen,"div")||
-                           br_ci_match(name,namelen,"h1")||br_ci_match(name,namelen,"h2")||
-                           br_ci_match(name,namelen,"h3")||br_ci_match(name,namelen,"h4")||
-                           br_ci_match(name,namelen,"h5")||br_ci_match(name,namelen,"h6")||
-                           br_ci_match(name,namelen,"li")||br_ci_match(name,namelen,"tr"))) {
+                } else if (!closing && is_block) {
+                    BR_NEWLINE(); if (o<max_out-1 && line>0) BR_PUT('\n');
+                    if (is_heading && bold_depth<200) bold_depth++;
+                    last_was_space = 1;
+                } else if (closing && is_block) {
+                    BR_NEWLINE();
+                    if (is_heading && bold_depth>0) bold_depth--;
+                    last_was_space = 1;
+                } else if (!closing && br_ci_match(name,namelen,"table")) {
                     BR_NEWLINE(); if (o<max_out-1 && line>0) BR_PUT('\n');
                     last_was_space = 1;
-                } else if (closing && (br_ci_match(name,namelen,"p")||br_ci_match(name,namelen,"div")||
-                           br_ci_match(name,namelen,"h1")||br_ci_match(name,namelen,"h2")||
-                           br_ci_match(name,namelen,"h3")||br_ci_match(name,namelen,"h4")||
-                           br_ci_match(name,namelen,"h5")||br_ci_match(name,namelen,"h6")||
-                           br_ci_match(name,namelen,"li")||br_ci_match(name,namelen,"tr"))) {
+                } else if (closing && br_ci_match(name,namelen,"table")) {
+                    BR_NEWLINE(); if (o<max_out-1) BR_PUT('\n');
+                    last_was_space = 1;
+                } else if (!closing && br_ci_match(name,namelen,"tr")) {
                     BR_NEWLINE(); last_was_space = 1;
+                } else if (closing && br_ci_match(name,namelen,"tr")) {
+                    BR_PUT('|'); BR_NEWLINE(); last_was_space = 1;
+                } else if (!closing && is_cell) {
+                    uint8_t is_th = br_ci_match(name,namelen,"th");
+                    if (is_th && bold_depth<200) bold_depth++;
+                    char cval[32]; int foundc=0;
+                    char bval[32]; int foundb=0;
+                    char sval[64];
+                    if (br_find_attr(tag,taglen,"style",sval,sizeof(sval))) {
+                        foundc = br_extract_style_color(sval,(int)kstrlen(sval),cval,sizeof(cval));
+                        foundb = br_extract_style_bg(sval,(int)kstrlen(sval),bval,sizeof(bval));
+                    }
+                    if (color_sp < 7) color_stack[color_sp++] = current_color;
+                    if (foundc) current_color = br_parse_color(cval,(int)kstrlen(cval));
+                    if (bg_sp < 7) bg_stack[bg_sp++] = current_bg;
+                    if (foundb) current_bg = br_parse_color(bval,(int)kstrlen(bval));
+                    BR_PUT('|'); BR_PUT(' ');
+                    td_col_start = col;
+                    last_was_space = 1;
+                } else if (closing && is_cell) {
+                    uint8_t is_th = br_ci_match(name,namelen,"th");
+                    int32_t pad = BR_TBL_COL_W - (col - td_col_start);
+                    while (pad-- > 0) BR_PUT(' ');
+                    if (is_th && bold_depth>0) bold_depth--;
+                    if (color_sp>0) current_color = color_stack[--color_sp];
+                    if (bg_sp>0) current_bg = bg_stack[--bg_sp];
+                    last_was_space = 1;
+                } else if (!closing && br_ci_match(name,namelen,"img")) {
+                    char alt[40]; int has_alt = br_find_attr(tag,taglen,"alt",alt,sizeof(alt));
+                    uint8_t sv_col = current_color;
+                    current_color = 9; // gray placeholder text
+                    if (italic_depth<200) italic_depth++;
+                    BR_PUT('['); BR_PUT('i'); BR_PUT('m'); BR_PUT('g');
+                    if (has_alt && alt[0]) {
+                        BR_PUT(':'); BR_PUT(' ');
+                        for (const char *ap=alt; *ap; ap++) BR_PUT(*ap);
+                    }
+                    BR_PUT(']');
+                    if (italic_depth>0) italic_depth--;
+                    current_color = sv_col;
+                    last_was_space = 0;
+                } else if (!closing && (br_ci_match(name,namelen,"b")||br_ci_match(name,namelen,"strong"))) {
+                    if (bold_depth<200) bold_depth++;
+                } else if (closing && (br_ci_match(name,namelen,"b")||br_ci_match(name,namelen,"strong"))) {
+                    if (bold_depth>0) bold_depth--;
+                } else if (!closing && (br_ci_match(name,namelen,"i")||br_ci_match(name,namelen,"em"))) {
+                    if (italic_depth<200) italic_depth++;
+                } else if (closing && (br_ci_match(name,namelen,"i")||br_ci_match(name,namelen,"em"))) {
+                    if (italic_depth>0) italic_depth--;
+                } else if (!closing && (br_ci_match(name,namelen,"u")||br_ci_match(name,namelen,"ins"))) {
+                    if (under_depth<200) under_depth++;
+                } else if (closing && (br_ci_match(name,namelen,"u")||br_ci_match(name,namelen,"ins"))) {
+                    if (under_depth>0) under_depth--;
+                } else if (!closing && (br_ci_match(name,namelen,"s")||br_ci_match(name,namelen,"strike")||br_ci_match(name,namelen,"del"))) {
+                    if (strike_depth<200) strike_depth++;
+                } else if (closing && (br_ci_match(name,namelen,"s")||br_ci_match(name,namelen,"strike")||br_ci_match(name,namelen,"del"))) {
+                    if (strike_depth>0) strike_depth--;
+                } else if (!closing && br_ci_match(name,namelen,"mark")) {
+                    if (bg_sp < 7) bg_stack[bg_sp++] = current_bg;
+                    current_bg = 6; // yellow highlight, like real browsers
+                } else if (closing && br_ci_match(name,namelen,"mark")) {
+                    if (bg_sp>0) current_bg = bg_stack[--bg_sp];
+                } else if (!closing && (br_ci_match(name,namelen,"font")||br_ci_match(name,namelen,"span"))) {
+                    char cval[32]; int foundc=0;
+                    char bval[32]; int foundb=0;
+                    if (br_find_attr(tag,taglen,"color",cval,sizeof(cval))) foundc=1;
+                    char sval[64];
+                    if (br_find_attr(tag,taglen,"style",sval,sizeof(sval))) {
+                        if (!foundc) foundc = br_extract_style_color(sval,(int)kstrlen(sval),cval,sizeof(cval));
+                        foundb = br_extract_style_bg(sval,(int)kstrlen(sval),bval,sizeof(bval));
+                    }
+                    if (color_sp < 7) color_stack[color_sp++] = current_color;
+                    if (foundc) current_color = br_parse_color(cval,(int)kstrlen(cval));
+                    if (bg_sp < 7) bg_stack[bg_sp++] = current_bg;
+                    if (foundb) current_bg = br_parse_color(bval,(int)kstrlen(bval));
+                } else if (closing && (br_ci_match(name,namelen,"font")||br_ci_match(name,namelen,"span"))) {
+                    if (color_sp>0) current_color = color_stack[--color_sp];
+                    if (bg_sp>0) current_bg = bg_stack[--bg_sp];
                 }
             }
             i = j+1;
@@ -2207,11 +2421,39 @@ static void br_html_to_text(const char *html, uint32_t html_len,
     *link_count = lc;
     #undef BR_PUT
     #undef BR_NEWLINE
+    #undef BR_CUR_STYLE
 }
 
 static void br_set_status(Window *w, const char *msg) {
     kstrncpy(w->st.br_status, msg, sizeof(w->st.br_status)-1);
     w->st.br_status[sizeof(w->st.br_status)-1] = 0;
+}
+
+// Draw one glyph honoring a br_style word: bold thickens strokes by ORing in
+// a 1px-left-shifted copy of the bitmap, italic shears rows via a lookup
+// shift, underline/strikethrough draw an extra horizontal rule.
+static void br_putc_styled(int32_t x, int32_t y, char c, uint32_t fg, uint32_t bg, uint16_t sty) {
+    uint8_t ch = (uint8_t)c;
+    if (ch >= 128) ch = '?';
+    const uint8_t *bm = g_font[ch];
+    uint8_t bold   = (sty & BR_STY_BOLD)   != 0;
+    uint8_t italic = (sty & BR_STY_ITALIC) != 0;
+    for (int row = 0; row < 8; row++) {
+        int shift = italic ? ((7 - row) >> 2) : 0; // top rows lean right more
+        uint8_t bits = bm[row];
+        for (int col = 0; col < 8; col++) {
+            int src = col - shift;
+            uint8_t on = 0;
+            if (src >= 0 && src < 8) on = (bits & (0x80 >> src)) ? 1 : 0;
+            if (!on && bold) {
+                int srcL = src - 1;
+                if (srcL >= 0 && srcL < 8) on = (bits & (0x80 >> srcL)) ? 1 : 0;
+            }
+            bb_pix(x + col, y + row, on ? fg : bg);
+        }
+    }
+    if (sty & BR_STY_UNDER)  for (int col=0; col<8; col++) bb_pix(x+col, y+7, fg);
+    if (sty & BR_STY_STRIKE) for (int col=0; col<8; col++) bb_pix(x+col, y+3, fg);
 }
 
 static void br_navigate(Window *w, const char *raw_url, uint8_t push_history) {
@@ -2248,7 +2490,7 @@ static void br_navigate(Window *w, const char *raw_url, uint8_t push_history) {
         return;
     }
 
-    br_html_to_text((const char*)body, len, w->st.text, &w->st.text_len, WIN_TEXT_BUF,
+    br_html_to_text((const char*)body, len, w->st.text, w->st.br_style, &w->st.text_len, WIN_TEXT_BUF,
                      w->st.br_link_line, w->st.br_link_href, &w->st.br_link_count, url);
     kfree(body);
     w->st.scroll_y = 0;
@@ -2336,6 +2578,7 @@ static void render_browser(Window *w, int32_t mx, int32_t my, uint8_t click) {
     gui_draw_rect_border(cx,content_y,cw,content_h,RGB(150,150,160),RGB(200,200,210));
 
     const char *p = st->text;
+    const uint16_t *sp = st->br_style;
     int32_t tx = cx+4, ty = content_y+3-st->scroll_y;
     int32_t lx = cx+4;
     int32_t cur_line = 0;
@@ -2345,7 +2588,18 @@ static void render_browser(Window *w, int32_t mx, int32_t my, uint8_t click) {
         uint8_t is_link_line = 0;
         for (int32_t k=0;k<st->br_link_count;k++)
             if (st->br_link_line[k]==cur_line) { is_link_line = 1; break; }
-        uint32_t fg = is_link_line ? RGB(20,80,200) : COL_TEXT;
+
+        uint16_t sb = *sp;
+        uint32_t fg, bgc;
+        uint8_t bidx = (uint8_t)((sb & BR_STY_BG_MASK) >> BR_STY_BG_SHIFT);
+        bgc = bidx ? br_palette_rgb[bidx] : RGB(255,255,255);
+        if (is_link_line) {
+            fg = RGB(20,80,200);
+            sb |= BR_STY_UNDER; // links are always underlined, regardless of source styling
+        } else {
+            uint8_t cidx = (uint8_t)(sb & BR_STY_FG_MASK);
+            fg = cidx ? br_palette_rgb[cidx] : COL_TEXT;
+        }
 
         if (*p=='\n') {
             if (is_link_line && click && mx>=cx && mx<cx+cw &&
@@ -2356,10 +2610,10 @@ static void render_browser(Window *w, int32_t mx, int32_t my, uint8_t click) {
             tx=lx; cur_line++; ty+=FONT_H+1; line_start_y=ty;
         } else {
             if (ty>=content_y-FONT_H && ty<content_y+content_h && tx<cx+cw)
-                gui_putc(tx,ty,*p,fg,RGB(255,255,255));
+                br_putc_styled(tx,ty,*p,fg,bgc,sb);
             tx+=FONT_W;
         }
-        p++;
+        p++; sp++;
     }
     (void)mx; (void)my;
 }
